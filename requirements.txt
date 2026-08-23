@@ -1,0 +1,19 @@
+# Day 5 — Agent orchestration framework + management portal
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+langgraph>=1.0.0,<2.0.0
+langgraph-checkpoint-sqlite>=3.0.0,<4.0.0
+langchain>=1.0.0,<2.0.0
+langchain-openai>=0.3.0
+pydantic>=2.7.0
+httpx>=0.28.0
+PyYAML>=6.0.0
+python-dotenv>=1.0.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+akshare>=1.16.80
+pandas
+numpy
+lightgbm
+scikit-learn
+torch

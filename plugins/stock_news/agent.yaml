@@ -1,0 +1,14 @@
+apiVersion: agent-framework/v1
+kind: Agent
+name: stock_news
+version: 1.0.0
+description: Collects and cross-validates A-share news from Eastmoney and CNINFO.
+entrypoint: service:build_agent
+port: 8022
+capabilities:
+  streaming: false
+inputs:
+  query: string
+  market_data: optional<string>
+outputs:
+  artifact: string

@@ -1,0 +1,13 @@
+apiVersion: agent-framework/v1
+kind: Agent
+name: stock_data
+version: 1.0.0
+description: Fetches A-share daily OHLCV, derives MACD signals, and builds quant features.
+entrypoint: service:build_agent
+port: 8021
+capabilities:
+  streaming: false
+inputs:
+  query: string
+outputs:
+  artifact: string

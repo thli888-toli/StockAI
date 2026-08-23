@@ -1,0 +1,42 @@
+version: 1
+name: stock_analysis
+entry: stock_data
+nodes:
+  stock_data:
+    type: agent
+    agent: stock_data
+    input:
+      query: "{query}"
+    output_key: market_data
+  stock_news:
+    type: agent
+    agent: stock_news
+    input:
+      query: "{query}"
+      market_data: "{market_data}"
+    output_key: news
+  stock_quant:
+    type: agent
+    agent: stock_quant
+    input:
+      query: "{query}"
+      market_data: "{market_data}"
+    output_key: quant
+  stock_analyst:
+    type: agent
+    agent: stock_analyst
+    input:
+      query: "{query}"
+      market_data: "{market_data}"
+      news: "{news}"
+      quant: "{quant}"
+    output_key: report
+edges:
+  - from: stock_data
+    to: stock_news
+  - from: stock_news
+    to: stock_quant
+  - from: stock_quant
+    to: stock_analyst
+  - from: stock_analyst
+    to: END

@@ -1,0 +1,16 @@
+apiVersion: agent-framework/v1
+kind: Agent
+name: stock_analyst
+version: 1.0.0
+description: Cross-validates LLM and LightGBM signals and writes a bilingual A-share report.
+entrypoint: service:build_agent
+port: 8023
+capabilities:
+  streaming: false
+inputs:
+  query: string
+  market_data: optional<string>
+  news: optional<string>
+  quant: optional<string>
+outputs:
+  artifact: string

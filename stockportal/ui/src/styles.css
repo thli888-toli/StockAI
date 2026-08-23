@@ -1,0 +1,215 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, system-ui, sans-serif;
+  background: #f5f6f8;
+  color: #1f2430;
+}
+
+.app {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.card {
+  background: white;
+  border: 1px solid #d9dce2;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.controls input {
+  padding: 8px;
+  border: 1px solid #c7ccd6;
+  border-radius: 6px;
+}
+
+.controls button {
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: #e9edff;
+  cursor: pointer;
+}
+
+.error {
+  color: #b02a2a;
+  font-weight: 600;
+}
+
+.report {
+  background: #fbfcfe;
+  border: 1px solid #d9dce2;
+  border-radius: 10px;
+  padding: 16px;
+  margin: 12px 0;
+  line-height: 1.65;
+}
+
+.report h1,
+.report h2,
+.report h3 {
+  margin-top: 1.2em;
+}
+
+.disclaimer {
+  color: #5d6472;
+  font-size: 13px;
+}
+
+.watchlist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.watchlist-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid #eceef2;
+}
+
+.watchlist-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.watchlist-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.muted {
+  color: #6b7280;
+}
+
+.status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+}
+
+.status-running {
+  background: #fff4d6;
+  color: #8a5a00;
+}
+
+.status-completed {
+  background: #e3f6e9;
+  color: #1f7a3d;
+}
+
+.status-failed {
+  background: #fde3e3;
+  color: #b02a2a;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 20, 30, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 50;
+}
+
+.modal {
+  background: white;
+  border-radius: 12px;
+  width: min(760px, 100%);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid #d9dce2;
+}
+
+.modal-header h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.modal-close {
+  border: 0;
+  background: transparent;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.modal-body {
+  padding: 16px;
+  overflow: auto;
+  line-height: 1.65;
+}
+
+.error-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #b02a2a;
+  background: #fdf1f1;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.controls button.active {
+  background: #dbe4ff;
+  font-weight: 600;
+}
+
+.chart {
+  width: 100%;
+  margin: 8px 0;
+}
+
+.price-chart {
+  height: 340px;
+}
+
+.macd-chart {
+  height: 160px;
+}
+
+.chart-overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.overview-badge {
+  font-size: 13px;
+  background: #eef1f7;
+  border: 1px solid #d9dce2;
+  border-radius: 999px;
+  padding: 4px 10px;
+}

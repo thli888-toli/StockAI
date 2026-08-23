@@ -1,0 +1,14 @@
+apiVersion: agent-framework/v1
+kind: Agent
+name: stock_quant
+version: 1.0.0
+description: Trains LightGBM trend models and emits structured 1/5/20-day probabilities.
+entrypoint: service:build_agent
+port: 8024
+capabilities:
+  streaming: false
+inputs:
+  query: string
+  market_data: optional<string>
+outputs:
+  artifact: string

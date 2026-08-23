@@ -1,0 +1,15 @@
+state/
+logs/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+portal-ui/node_modules/
+portal-ui/dist/
+portal-ui/*.tsbuildinfo
+stockportal/ui/node_modules/
+stockportal/ui/dist/
+stockportal/ui/*.tsbuildinfo
+*.db
+*.db-shm
+*.db-wal
