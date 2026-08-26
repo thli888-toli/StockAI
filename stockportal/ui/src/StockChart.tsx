@@ -13,6 +13,15 @@ import { getToken } from "./api";
 
 type Period = "daily" | "weekly" | "monthly";
 
+type FundamentalInfo = {
+  mid_price: number;
+  low: number | null;
+  high: number | null;
+  current_price: number | null;
+  deviation_pct: number | null;
+  verdict: string | null;
+} | null;
+
 type ChartPayload = {
   symbol: string;
   period: Period;
@@ -30,6 +39,7 @@ type ChartPayload = {
     monthly: { support: number; resistance: number };
   };
   llm_summary: { overall: "bullish" | "bearish" | "neutral"; text: string } | null;
+  fundamental: FundamentalInfo;
 };
 
 
@@ -61,7 +71,11 @@ export default function StockChart({ symbol }: { symbol: string }) {
     weekly?: string;
     monthly?: string;
     llm?: { overall: string; text: string } | null;
+    fundamental?: FundamentalInfo;
   }>({});
+  const [legend, setLegend] = useState<
+    { label: string; value: string; color: string }[]
+  >([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,6 +106,7 @@ export default function StockChart({ symbol }: { symbol: string }) {
         weekly: data.signals?.["1w"],
         monthly: data.signals?.["1mo"],
         llm: data.llm_summary,
+        fundamental: data.fundamental,
       });
 
       priceRef.current.innerHTML = "";
@@ -111,6 +126,7 @@ export default function StockChart({ symbol }: { symbol: string }) {
         borderDownColor: "#2f9e44",
         wickUpColor: "#e04c4c",
         wickDownColor: "#2f9e44",
+        lastValueVisible: false,
       });
       candleSeries.setData(
         data.candles.map((candle) => ({
@@ -126,7 +142,7 @@ export default function StockChart({ symbol }: { symbol: string }) {
         color: "#2f9e44",
         lineWidth: 1,
         lineStyle: 2,
-        axisLabelVisible: true,
+        axisLabelVisible: false,
         title: "支撑",
       });
       candleSeries.createPriceLine({
@@ -134,11 +150,57 @@ export default function StockChart({ symbol }: { symbol: string }) {
         color: "#e04c4c",
         lineWidth: 1,
         lineStyle: 2,
-        axisLabelVisible: true,
+        axisLabelVisible: false,
         title: "阻力",
       });
+      if (data.fundamental?.mid_price != null) {
+        const deviation = data.fundamental.deviation_pct;
+        const deviationText =
+          deviation == null
+            ? ""
+            : `（${deviation >= 0 ? "+" : ""}${deviation.toFixed(1)}%）`;
+        candleSeries.createPriceLine({
+          price: data.fundamental.mid_price,
+          color: "#9013fe",
+          lineWidth: 2,
+          lineStyle: 2,
+          axisLabelVisible: false,
+          title: `中枢 ${data.fundamental.mid_price}${deviationText}`,
+        });
+      }
 
       const lastCandle = data.candles[data.candles.length - 1];
+      const legendItems: { label: string; value: string; color: string }[] = [];
+      if (lastCandle) {
+        legendItems.push({
+          label: "当前价",
+          value: String(lastCandle.close),
+          color: "#333333",
+        });
+      }
+      legendItems.push({
+        label: "支撑",
+        value: String(data.levels[period].support),
+        color: "#2f9e44",
+      });
+      legendItems.push({
+        label: "阻力",
+        value: String(data.levels[period].resistance),
+        color: "#e04c4c",
+      });
+      if (data.fundamental?.mid_price != null) {
+        const deviation = data.fundamental.deviation_pct;
+        const deviationText =
+          deviation == null
+            ? ""
+            : `（${deviation >= 0 ? "+" : ""}${deviation.toFixed(1)}%）`;
+        legendItems.push({
+          label: "中枢",
+          value: `${data.fundamental.mid_price}${deviationText}`,
+          color: "#9013fe",
+        });
+      }
+      setLegend(legendItems);
       if (lastCandle) {
         const shapes = {
           up: "arrowUp",
@@ -228,8 +290,10 @@ export default function StockChart({ symbol }: { symbol: string }) {
     };
   }, [symbol, period]);
 
+  const fundamentalInfo = overview.fundamental;
+
   return (
-    <div>
+    <div className="chart-page">
       <div className="controls">
         {(["daily", "weekly", "monthly"] as Period[]).map((item) => (
           <button
@@ -250,9 +314,37 @@ export default function StockChart({ symbol }: { symbol: string }) {
             LLM 观点：{overallCn(overview.llm.overall)} · {overview.llm.text}
           </span>
         )}
+        {fundamentalInfo && fundamentalInfo.mid_price != null && (
+          <span className="overview-badge">
+            估值中枢：{fundamentalInfo.mid_price} 元
+            {fundamentalInfo.current_price != null &&
+              ` · 当前价 ${fundamentalInfo.current_price} 元`}
+            {fundamentalInfo.deviation_pct != null &&
+              `（偏离 ${fundamentalInfo.deviation_pct >= 0 ? "+" : ""}${fundamentalInfo.deviation_pct.toFixed(1)}%）`}
+            {fundamentalInfo.verdict && ` · ${fundamentalInfo.verdict}`}
+          </span>
+        )}
       </div>
-      <div ref={priceRef} className="chart price-chart" />
-      <div ref={macdRef} className="chart macd-chart" />
+      <div className="chart-with-legend">
+        <div className="chart-stack">
+          <div ref={priceRef} className="chart price-chart" />
+          <div ref={macdRef} className="chart macd-chart" />
+        </div>
+        {legend.length > 0 && (
+          <div className="chart-legend">
+            {legend.map((item) => (
+              <div key={item.label} className="chart-legend-item">
+                <span
+                  className="legend-dot"
+                  style={{ backgroundColor: item.color }}
+                />
+                <span className="legend-label">{item.label}</span>
+                <span className="legend-value">{item.value}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

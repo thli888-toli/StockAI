@@ -1,0 +1,3 @@
+orchestrator:
+  max_running_runs: 6
+  queue_check_interval_seconds: 1

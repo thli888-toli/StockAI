@@ -17,7 +17,7 @@ export type RunEvent = {
 export type RunSummary = {
   run_id: string;
   graph_config?: string | null;
-  status: "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed";
   query: string;
   outputs: Record<string, unknown>;
   error?: string | null;
@@ -64,6 +64,7 @@ export type LogRecord = {
   node_id?: string | null;
   event?: string | null;
   message: string;
+  extra?: string | null;
 };
 
 export type MetricRow = Record<string, string | number>;

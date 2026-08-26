@@ -114,6 +114,11 @@ body {
   color: #8a5a00;
 }
 
+.status-queued {
+  background: #e7ecf8;
+  color: #40517c;
+}
+
 .status-completed {
   background: #e3f6e9;
   color: #1f7a3d;
@@ -138,7 +143,7 @@ body {
 .modal {
   background: white;
   border-radius: 12px;
-  width: min(760px, 100%);
+  width: min(1000px, 100%);
   max-height: 88vh;
   display: flex;
   flex-direction: column;
@@ -212,4 +217,116 @@ body {
   border: 1px solid #d9dce2;
   border-radius: 999px;
   padding: 4px 10px;
+}
+
+.chart-with-legend {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.chart-stack {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chart-stack .chart {
+  width: 100%;
+  margin: 0;
+}
+
+.chart-stack .macd-chart {
+  margin-top: 8px;
+}
+
+.chart-legend {
+  width: 170px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  background: #f7f8fa;
+  border: 1px solid #e2e5ea;
+  border-radius: 8px;
+  font-size: 13px;
+  align-self: flex-start;
+}
+
+.chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.legend-label {
+  color: #666;
+}
+
+.legend-value {
+  margin-left: auto;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Chart page enlarged ~30% */
+.chart-page .controls {
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.chart-page .controls button {
+  font-size: 17px;
+  padding: 10px 16px;
+}
+
+.chart-page .chart-overview {
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.chart-page .overview-badge {
+  font-size: 17px;
+  padding: 5px 13px;
+}
+
+.chart-page .chart-with-legend {
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.chart-page .price-chart {
+  height: 442px;
+}
+
+.chart-page .macd-chart {
+  height: 208px;
+  margin-top: 10px;
+}
+
+.chart-page .chart-legend {
+  width: 221px;
+  gap: 13px;
+  padding: 13px;
+  font-size: 17px;
+  border-radius: 10px;
+}
+
+.chart-page .chart-legend-item {
+  gap: 8px;
+}
+
+.chart-page .legend-dot {
+  width: 13px;
+  height: 13px;
 }

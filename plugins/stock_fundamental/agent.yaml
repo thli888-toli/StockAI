@@ -1,17 +1,14 @@
 apiVersion: agent-framework/v1
 kind: Agent
-name: stock_analyst
+name: stock_fundamental
 version: 1.0.0
-description: Cross-validates LLM and LightGBM signals and writes a bilingual A-share report.
+description: Analyzes the latest year of financial reports and estimates a fair-value range from fundamentals.
 entrypoint: service:build_agent
-port: 8023
+port: 8025
 capabilities:
   streaming: false
 inputs:
   query: string
   market_data: optional<string>
-  news: optional<string>
-  quant: optional<string>
-  fundamental: optional<string>
 outputs:
   artifact: string

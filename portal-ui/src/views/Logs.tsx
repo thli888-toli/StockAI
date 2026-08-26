@@ -67,6 +67,7 @@ export default function Logs({ agents }: { agents: AgentStatus[] }) {
           <tr>
             <th>Time</th>
             <th>Level</th>
+            <th>Service</th>
             <th>Run</th>
             <th>Node</th>
             <th>Event</th>
@@ -76,12 +77,16 @@ export default function Logs({ agents }: { agents: AgentStatus[] }) {
         <tbody>
           {rows.map((row) => (
             <tr key={row.id}>
-              <td>{new Date(row.ts).toLocaleTimeString()}</td>
+              <td>{new Date(row.ts).toLocaleString()}</td>
               <td>{row.level}</td>
+              <td>{row.service}</td>
               <td>{row.run_id ?? ""}</td>
               <td>{row.node_id ?? ""}</td>
               <td>{row.event ?? ""}</td>
-              <td>{row.message}</td>
+              <td>
+                {row.message}
+                {row.extra ? <pre className="log-extra">{row.extra}</pre> : null}
+              </td>
             </tr>
           ))}
         </tbody>

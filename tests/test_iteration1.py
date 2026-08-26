@@ -127,7 +127,7 @@ def test_orchestrator_lists_and_applies_graph_configs(tmp_path):
         ),
         encoding="utf-8",
     )
-    orchestrator = Orchestrator(tmp_path / "a.yaml")
+    orchestrator = Orchestrator(tmp_path / "a.yaml", queue_db=tmp_path / "queue.db")
     configs = orchestrator.list_graph_configs()
     assert {item["name"] for item in configs} == {"a.yaml", "b.yaml"}
     assert next(item for item in configs if item["name"] == "a.yaml")["active"] is True
@@ -162,7 +162,11 @@ def test_orchestrator_apply_endpoint_accepts_body(tmp_path):
         ),
         encoding="utf-8",
     )
-    app = create_orchestrator_app(tmp_path / "a.yaml", checkpoint_db=tmp_path / "orchestrator.db")
+    app = create_orchestrator_app(
+        tmp_path / "a.yaml",
+        checkpoint_db=tmp_path / "orchestrator.db",
+        queue_db=tmp_path / "queue.db",
+    )
     with TestClient(app) as client:
         response = client.post(
             "/graph-configs/apply",
@@ -237,7 +241,7 @@ def _write_manifest(tmp_path, name: str):
 @pytest.mark.asyncio
 async def test_orchestrator_marks_run_failed_on_timeout(tmp_path, monkeypatch):
     manifest = _write_manifest(tmp_path, "a")
-    orchestrator = Orchestrator(manifest, run_timeout=0.05)
+    orchestrator = Orchestrator(manifest, queue_db=tmp_path / "queue.db", run_timeout=0.05)
 
     class HangingClient:
         async def run(self, agent_name, request):
@@ -246,6 +250,7 @@ async def test_orchestrator_marks_run_failed_on_timeout(tmp_path, monkeypatch):
 
     orchestrator.agent_client = HangingClient()
     summary = orchestrator.start_run("q", run_id="timeout_run")
+    await orchestrator._process_queue()
     task = orchestrator._run_tasks[summary.run_id]
     await task
 
@@ -258,7 +263,7 @@ async def test_orchestrator_marks_run_failed_on_timeout(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_orchestrator_cancels_running_run(tmp_path, monkeypatch):
     manifest = _write_manifest(tmp_path, "a")
-    orchestrator = Orchestrator(manifest, run_timeout=30)
+    orchestrator = Orchestrator(manifest, queue_db=tmp_path / "queue.db", run_timeout=30)
 
     class HangingClient:
         async def run(self, agent_name, request):
@@ -267,6 +272,7 @@ async def test_orchestrator_cancels_running_run(tmp_path, monkeypatch):
 
     orchestrator.agent_client = HangingClient()
     summary = orchestrator.start_run("q", run_id="cancel_run")
+    await orchestrator._process_queue()
     await asyncio.sleep(0.01)
     cancelled = await orchestrator.cancel_run(summary.run_id)
     assert cancelled.status == "failed"
@@ -278,7 +284,7 @@ async def test_orchestrator_cancels_running_run(tmp_path, monkeypatch):
 async def test_apply_graph_config_rejects_active_runs(tmp_path, monkeypatch):
     a_path = _write_manifest(tmp_path, "a")
     b_path = _write_manifest(tmp_path, "b")
-    orchestrator = Orchestrator(a_path, run_timeout=30)
+    orchestrator = Orchestrator(a_path, queue_db=tmp_path / "queue.db", run_timeout=30)
 
     class HangingClient:
         async def run(self, agent_name, request):
@@ -299,12 +305,14 @@ async def test_concurrent_runs_share_checkpointer_and_complete(tmp_path):
     orchestrator = Orchestrator(
         manifest,
         checkpoint_db=tmp_path / "orchestrator.db",
+        queue_db=tmp_path / "queue.db",
         run_timeout=10,
     )
     orchestrator.agent_client = FakeAgentClient()
     try:
         first = orchestrator.start_run("q1", run_id="concurrent-1")
         second = orchestrator.start_run("q2", run_id="concurrent-2")
+        await orchestrator._process_queue()
         await asyncio.gather(
             orchestrator._run_tasks[first.run_id],
             orchestrator._run_tasks[second.run_id],

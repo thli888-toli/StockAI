@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -172,23 +173,30 @@ def test_quant_payload_is_neutral_when_history_is_insufficient():
     assert data["warnings"]
 
 
-def test_quant_payload_uses_lstm_only(monkeypatch):
+def test_quant_payload_ensembles_lstm_and_lightgbm(monkeypatch):
     from plugins.stock_quant import service as quant_service
 
     monkeypatch.setattr(
         quant_service,
-        "_lstm_signal",
-        lambda df, target, min_train, seq_len, epochs: {
-            "up_probability": 0.4,
-            "direction": "down",
-            "confidence": 0.2,
-        },
+        "_lightgbm_probability",
+        lambda df, target, min_train: 0.4,
+    )
+    monkeypatch.setattr(
+        quant_service,
+        "_lstm_probability",
+        lambda df, target, min_train, seq_len, epochs: 0.4,
+    )
+    monkeypatch.setattr(
+        quant_service,
+        "_lightgbm_walk_forward",
+        lambda df, target, min_train, validation: (0.6, len(df), [], []),
     )
     monkeypatch.setattr(
         quant_service,
         "_lstm_walk_forward",
-        lambda df, target, min_train, validation, seq_len, epochs: (0.5, len(df)),
+        lambda df, target, min_train, validation, seq_len, epochs: (0.6, len(df), [], []),
     )
+    monkeypatch.setattr(quant_service, "_fit_calibration", lambda y_true, y_pred: None)
     monkeypatch.setattr(quant_service, "_period_features", lambda records, freq: pd.DataFrame())
     monkeypatch.setattr(quant_service, "_period_ohlcv", lambda records, freq: pd.DataFrame())
 
@@ -196,11 +204,11 @@ def test_quant_payload_uses_lstm_only(monkeypatch):
     payload = quant_service._build_quant_payload("600519", records, "2026-08-22")
     data = __import__("json").loads(payload)
 
-    assert data["model"] == "LSTM"
+    assert data["model"] == "LSTM+LightGBM"
     assert "models" not in data
     assert set(data["horizons"]) == {"5d", "15d", "1w", "1mo"}
     assert data["horizons"]["5d"]["direction"] == "down"
-    assert data["backtest"]["walk_forward_auc"] == 0.5
+    assert data["backtest"]["walk_forward_auc"] == 0.6
     assert data["weekly_backtest"]["sample_count"] == 0
 
 
@@ -275,8 +283,23 @@ def test_stock_graph_manifest_is_valid():
     manifest_data = yaml.safe_load((ROOT / "config" / "orchestration.yaml").read_text(encoding="utf-8"))
     manifest = GraphManifest.model_validate(manifest_data)
     assert manifest.entry == "stock_data"
-    assert set(manifest.nodes) == {"stock_data", "stock_news", "stock_quant", "stock_analyst"}
+    assert set(manifest.nodes) == {
+        "stock_data",
+        "stock_news",
+        "stock_quant",
+        "stock_fundamental",
+        "stock_analyst",
+    }
     assert manifest.nodes["stock_analyst"].input["quant"] == "{quant}"
+    assert manifest.nodes["stock_analyst"].input["fundamental"] == "{fundamental}"
+    assert manifest.nodes["stock_fundamental"].input["market_data"] == "{market_data}"
+    edges = {(edge.source, edge.to) for edge in manifest.edges}
+    assert ("stock_data", "stock_news") in edges
+    assert ("stock_data", "stock_quant") in edges
+    assert ("stock_data", "stock_fundamental") in edges
+    assert ("stock_fundamental", "stock_analyst") in edges
+    assert ("stock_news", "stock_analyst") in edges
+    assert ("stock_quant", "stock_analyst") in edges
 
 
 @pytest.mark.asyncio
@@ -293,6 +316,37 @@ async def test_analyst_deterministic_fallback_report(monkeypatch):
     report = await StockAnalystHandler().run(request)
     assert "免责声明" in report
     assert "600519" in report
+    assert "## 基本面与估值" in report
+    assert "基本面数据暂不可用" in report
+
+
+@pytest.mark.asyncio
+async def test_analyst_fallback_report_embeds_fundamental_section(monkeypatch):
+    monkeypatch.setattr("plugins.stock_analyst.service.llm_configured", lambda: False)
+    fundamental = {
+        "report_section": (
+            "## 基本面与估值（测试 600519）\n"
+            "- 合理股价估算（多方法综合）：区间 1000.00–1250.00 元，中枢 1100.00 元。\n"
+            "- 判断：低估。"
+        ),
+        "summary": {
+            "valuation_verdict": "低估",
+            "fair_value_range": {"low": 1000.0, "mid": 1100.0, "high": 1250.0},
+        },
+    }
+    request = TaskRequest(
+        query="600519",
+        inputs={
+            "market_data": '{"symbol":"600519","company_name":"测试","industry":"白酒","macd":{"daily":{"trend":"bullish"}},"latest":{},"as_of":"2026-08-22"}',
+            "news": '{"source_counts":{"eastmoney":1,"cninfo":1,"cross_validated":1},"warnings":[]}',
+            "quant": '{"horizons":{"5d":{"direction":"up","up_probability":0.6,"confidence":0.2}},"backtest":{}}',
+            "fundamental": json.dumps(fundamental),
+        },
+    )
+    report = await StockAnalystHandler().run(request)
+    assert "## 基本面与估值（测试 600519）" in report
+    assert "中枢 1100.00 元" in report
+    assert "基本面数据暂不可用" not in report
 
 
 def test_xq_symbol_uses_uppercase_market_prefix():
@@ -363,7 +417,7 @@ async def test_analyst_uses_fallback_when_llm_call_raises(monkeypatch):
         },
     )
     report = await StockAnalystHandler().run(request)
-    assert "确定性回退报告" in report
+    assert "A股市场观察报告" in report
 
 
 @pytest.mark.asyncio

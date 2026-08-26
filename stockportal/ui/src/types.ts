@@ -9,7 +9,7 @@ export type RunSummary = {
   updated_at: string;
 };
 
-export type RunStatus = "running" | "completed" | "failed";
+export type RunStatus = "queued" | "running" | "completed" | "failed";
 
 export type WatchlistItem = {
   symbol: string;

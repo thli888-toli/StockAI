@@ -57,8 +57,8 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
   const [waiting, setWaiting] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string>("");
   const [runFilter, setRunFilter] = useState("");
-  const [showRunLogs, setShowRunLogs] = useState(false);
-  const [runLogs, setRunLogs] = useState<LogRecord[]>([]);
+  const [selectedNode, setSelectedNode] = useState<{ id: string; agent: string } | null>(null);
+  const [nodeLogs, setNodeLogs] = useState<LogRecord[]>([]);
   const filteredRuns = useMemo(
     () => (runFilter ? runs.filter((run) => run.graph_config === runFilter) : runs),
     [runFilter, runs]
@@ -66,11 +66,6 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
   const selectedRun =
     filteredRuns.find((run) => run.run_id === selectedRunId) ?? filteredRuns[0];
   const activeRunId = selectedRun?.run_id ?? "";
-
-  useEffect(() => {
-    setShowRunLogs(false);
-    setRunLogs([]);
-  }, [selectedRunId]);
 
   useEffect(() => {
     let alive = true;
@@ -96,14 +91,15 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
   }, []);
 
   useEffect(() => {
-    if (!showRunLogs || !activeRunId) return;
+    if (!selectedNode || !activeRunId) return;
     let alive = true;
     const refresh = async () => {
       try {
         const params = new URLSearchParams();
         params.set("run_id", activeRunId);
-        const data = await api.allLogs(params);
-        if (alive) setRunLogs(data);
+        params.set("node_id", selectedNode.id);
+        const data = await api.logs(selectedNode.agent, params);
+        if (alive) setNodeLogs(data);
       } catch {
         // Backend may be unavailable.
       }
@@ -114,7 +110,7 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
       alive = false;
       window.clearInterval(id);
     };
-  }, [showRunLogs, activeRunId]);
+  }, [selectedNode, activeRunId]);
 
   const applyConfig = async () => {
     if (!selectedConfig) return;
@@ -157,13 +153,17 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
     }
   };
 
-  const visited = useMemo(() => {
-    if (!selectedRun) return new Set<string>();
-    return new Set(
-      selectedRun.events
-        .map((event) => event.node)
-        .filter((node): node is string => Boolean(node))
-    );
+  const nodeStatus = useMemo(() => {
+    const statuses: Record<string, "completed" | "failed"> = {};
+    for (const event of selectedRun?.events ?? []) {
+      if (!event.node) continue;
+      if (event.event === "failed") {
+        statuses[event.node] = "failed";
+      } else if (event.event === "completed") {
+        statuses[event.node] = "completed";
+      }
+    }
+    return statuses;
   }, [selectedRun]);
 
   const flowNodes = useMemo(() => {
@@ -178,11 +178,21 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
       },
       position: positions[id] ?? { x: 0, y: 0 },
       style: {
-        background: visited.has(id) ? "#dff7e8" : "#ffffff",
-        border: visited.has(id) ? "2px solid #157347" : "1px solid #9aa1ad"
+        background:
+          nodeStatus[id] === "failed"
+            ? "#fde3e3"
+            : nodeStatus[id] === "completed"
+              ? "#dff7e8"
+              : "#ffffff",
+        border:
+          nodeStatus[id] === "failed"
+            ? "2px solid #b02a2a"
+            : nodeStatus[id] === "completed"
+              ? "2px solid #157347"
+              : "1px solid #9aa1ad"
       }
     }));
-  }, [graph, visited]);
+  }, [graph, nodeStatus]);
 
   const flowEdges = useMemo(() => {
     if (!graph) return [];
@@ -228,18 +238,23 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
             </option>
           ))}
         </select>
-        {selectedRun && (
-          <button onClick={() => setShowRunLogs((current) => !current)}>
-            {showRunLogs ? "Hide logs" : "View logs"}
-          </button>
-        )}
         {selectedRun?.status === "running" && (
           <button onClick={cancelSelectedRun}>Cancel selected job</button>
         )}
       </div>
       {graph ? (
         <div className="flow">
-          <ReactFlow nodes={flowNodes} edges={flowEdges} fitView>
+          <ReactFlow
+            nodes={flowNodes}
+            edges={flowEdges}
+            fitView
+            onNodeClick={(_, node) => {
+              if (node.id === "END" || !graph) return;
+              const spec = graph.nodes[node.id];
+              const agent = spec?.agent;
+              if (agent) setSelectedNode({ id: node.id, agent });
+            }}
+          >
             <Background />
             <Controls />
           </ReactFlow>
@@ -247,37 +262,49 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
       ) : (
         <p>Graph not available.</p>
       )}
-      {showRunLogs && (
-        <div className="run-logs">
-          <h3>Logs for job {selectedRun?.run_id.slice(0, 8)}</h3>
-          {runLogs.length ? (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Agent</th>
-                  <th>Level</th>
-                  <th>Node</th>
-                  <th>Event</th>
-                  <th>Message</th>
-                </tr>
-              </thead>
-              <tbody>
-                {runLogs.map((row) => (
-                  <tr key={row.id}>
-                    <td>{new Date(row.ts).toLocaleTimeString()}</td>
-                    <td>{row.agent}</td>
-                    <td>{row.level}</td>
-                    <td>{row.node_id ?? ""}</td>
-                    <td>{row.event ?? ""}</td>
-                    <td>{row.message}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <p>No logs for the selected job.</p>
-          )}
+      {selectedNode && (
+        <div className="modal-overlay" onClick={() => setSelectedNode(null)}>
+          <div className="modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <h3>
+                Logs — {selectedNode.agent} / {selectedNode.id}
+              </h3>
+              <button className="modal-close" onClick={() => setSelectedNode(null)}>
+                ×
+              </button>
+            </div>
+            <div className="modal-body">
+              {nodeLogs.length ? (
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>级别</th>
+                      <th>服务</th>
+                      <th>事件</th>
+                      <th>信息</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {nodeLogs.map((row) => (
+                      <tr key={row.id}>
+                        <td>{new Date(row.ts).toLocaleString()}</td>
+                        <td>{row.level}</td>
+                        <td>{row.service}</td>
+                        <td>{row.event ?? ""}</td>
+                        <td>
+                          {row.message}
+                          {row.extra ? <pre className="log-extra">{row.extra}</pre> : null}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p>该节点暂无日志。</p>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </section>

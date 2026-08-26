@@ -46,6 +46,16 @@ FEATURE_COLUMNS = [
     "turnover",
 ]
 
+LIGHTGBM_PARAMS = {
+    "num_leaves": 31,
+    "learning_rate": 0.05,
+    "n_estimators": 200,
+    "min_child_samples": 20,
+    "objective": "binary",
+    "random_state": 42,
+    "verbosity": -1,
+}
+
 DAILY_SEQ_LEN = 15
 DAILY_MIN_TRAIN = 120
 DAILY_VALIDATION = 180
@@ -122,35 +132,50 @@ def _period_features(records: list[dict[str, Any]], freq: str) -> pd.DataFrame:
     return prepare_daily_features(frame)
 
 
-def _lstm_signal(
+def _new_model():
+    from lightgbm import LGBMClassifier
+
+    return LGBMClassifier(**LIGHTGBM_PARAMS)
+
+
+def _lstm_probability(
     df: pd.DataFrame,
     target_column: str,
     min_train: int,
     seq_len: int,
     epochs: int,
-) -> dict[str, Any]:
+) -> float:
     usable = df.dropna(subset=[target_column])
     if len(usable) < min_train:
-        return _neutral_horizon()
-
+        return 0.5
     features_all = df[FEATURE_COLUMNS].to_numpy(dtype=np.float64)
     usable_features = usable[FEATURE_COLUMNS].to_numpy(dtype=np.float64)
     usable_labels = usable[target_column].to_numpy(dtype=np.float64)
-
     standardized, mean, std = lstm_model.standardize(features_all)
     usable_standardized = (usable_features - mean) / std
-    probability = lstm_model.predict_latest(
-        standardized,
-        usable_standardized,
-        usable_labels,
-        seq_len=seq_len,
-        epochs=epochs,
+    return float(
+        lstm_model.predict_latest(
+            standardized,
+            usable_standardized,
+            usable_labels,
+            seq_len=seq_len,
+            epochs=epochs,
+        )
     )
-    return {
-        "up_probability": round(float(probability), 6),
-        "direction": direction_from_probability(probability),
-        "confidence": confidence_from_probability(probability),
-    }
+
+
+def _lightgbm_probability(
+    df: pd.DataFrame,
+    target_column: str,
+    min_train: int,
+) -> float:
+    usable = df.dropna(subset=[target_column])
+    if len(usable) < min_train:
+        return 0.5
+    model = _new_model()
+    model.fit(usable[FEATURE_COLUMNS], usable[target_column])
+    latest = df.iloc[[-1]][FEATURE_COLUMNS].fillna(0.0)
+    return float(model.predict_proba(latest)[0, 1])
 
 
 def _lstm_walk_forward(
@@ -160,21 +185,160 @@ def _lstm_walk_forward(
     validation_size: int,
     seq_len: int,
     epochs: int,
-) -> tuple[float, int]:
+) -> tuple[float, int, list[float], list[float]]:
+    from sklearn.metrics import roc_auc_score
+
     usable = df.dropna(subset=[target_column])
     if len(usable) < min_train:
-        return 0.0, len(usable)
-    features = usable[FEATURE_COLUMNS].to_numpy(dtype=np.float64)
-    labels = usable[target_column].to_numpy(dtype=np.float64)
+        return 0.0, len(usable), [], []
+
+    y_true_all: list[float] = []
+    y_pred_all: list[float] = []
+    end = min_train
+    while end < len(usable):
+        val_end = min(end + validation_size, len(usable))
+        train_x, train_y = _lstm_sequences(usable, 0, end, seq_len, target_column)
+        val_x, val_y = _lstm_sequences(usable, end, val_end, seq_len, target_column)
+        if len(train_x) == 0 or len(val_x) == 0:
+            end = val_end
+            continue
+        if len(set(train_y.tolist())) < 2 or len(set(val_y.tolist())) < 2:
+            end = val_end
+            continue
+        model = lstm_model._train_model(train_x, train_y, epochs)
+        predictions = lstm_model.predict_proba(model, val_x)
+        y_true_all.extend(val_y.tolist())
+        y_pred_all.extend(predictions.tolist())
+        end = val_end
+
+    if not y_true_all or len(set(y_true_all)) < 2:
+        return 0.0, len(usable), y_true_all, y_pred_all
+    auc = float(roc_auc_score(y_true_all, y_pred_all))
+    return round(auc, 6), len(usable), y_true_all, y_pred_all
+
+
+def _lstm_sequences(
+    usable: pd.DataFrame,
+    start: int,
+    end: int,
+    seq_len: int,
+    target_column: str,
+):
+    features = usable.iloc[start:end][FEATURE_COLUMNS].to_numpy(dtype=np.float64)
+    labels = usable.iloc[start:end][target_column].to_numpy(dtype=np.float64)
     standardized, _, _ = lstm_model.standardize(features)
-    return lstm_model.walk_forward_auc(
-        standardized,
-        labels,
-        min_train=min_train,
-        validation_size=validation_size,
-        seq_len=seq_len,
-        epochs=epochs,
+    return lstm_model.build_sequences(standardized, labels, seq_len)
+
+
+def _lightgbm_walk_forward(
+    df: pd.DataFrame,
+    target_column: str,
+    min_train: int,
+    validation_size: int,
+) -> tuple[float, int, list[float], list[float]]:
+    from sklearn.metrics import roc_auc_score
+
+    usable = df.dropna(subset=[target_column])
+    if len(usable) < min_train:
+        return 0.0, len(usable), [], []
+
+    y_true_all: list[float] = []
+    y_pred_all: list[float] = []
+    end = min_train
+    while end < len(usable):
+        val_end = min(end + validation_size, len(usable))
+        train = usable.iloc[:end]
+        val = usable.iloc[end:val_end]
+        if val.empty:
+            break
+        if train[target_column].nunique() < 2 or val[target_column].nunique() < 2:
+            end = val_end
+            continue
+        model = _new_model()
+        model.fit(train[FEATURE_COLUMNS], train[target_column])
+        y_true_all.extend(val[target_column].tolist())
+        y_pred_all.extend(model.predict_proba(val[FEATURE_COLUMNS])[:, 1].tolist())
+        end = val_end
+
+    if not y_true_all or len(set(y_true_all)) < 2:
+        return 0.0, len(usable), y_true_all, y_pred_all
+    auc = float(roc_auc_score(y_true_all, y_pred_all))
+    return round(auc, 6), len(usable), y_true_all, y_pred_all
+
+
+def _fit_calibration(
+    y_true: list[float],
+    y_pred: list[float],
+    bins: int = 10,
+    prior: float = 5.0,
+) -> pd.DataFrame | None:
+    if len(y_true) < 30 or len(set(y_true)) < 2:
+        return None
+    frame = pd.DataFrame(
+        {
+            "y": [float(value) for value in y_true],
+            "p": [float(value) for value in y_pred],
+        }
     )
+    try:
+        frame["bin"] = pd.qcut(
+            frame["p"],
+            q=min(bins, max(2, frame["p"].nunique())),
+            duplicates="drop",
+        )
+    except Exception:
+        return None
+    mapping = (
+        frame.groupby("bin", observed=True)
+        .agg(p_mean=("p", "mean"), y_mean=("y", "mean"), count=("y", "size"))
+        .reset_index(drop=True)
+        .sort_values("p_mean")
+    )
+    mapping["calibrated"] = (mapping["count"] * mapping["y_mean"] + prior * 0.5) / (
+        mapping["count"] + prior
+    )
+    return mapping
+
+
+def _apply_calibration(probability: float, mapping: pd.DataFrame | None) -> float:
+    if mapping is None or mapping.empty:
+        return probability
+    index = (mapping["p_mean"] - probability).abs().idxmin()
+    return float(mapping.loc[index, "calibrated"])
+
+
+def _ensemble_signal(
+    lgb_probability: float,
+    lstm_probability: float,
+    lgb_auc: float,
+    lstm_auc: float,
+    lgb_calibration: pd.DataFrame | None = None,
+    lstm_calibration: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    lgb_weight = max(0.0, lgb_auc - 0.5)
+    lstm_weight = max(0.0, lstm_auc - 0.5)
+    total_weight = lgb_weight + lstm_weight
+    if total_weight <= 0:
+        return _neutral_horizon()
+
+    lgb_probability = (
+        _apply_calibration(lgb_probability, lgb_calibration)
+        if lgb_auc > 0.5
+        else lgb_probability
+    )
+    lstm_probability = (
+        _apply_calibration(lstm_probability, lstm_calibration)
+        if lstm_auc > 0.5
+        else lstm_probability
+    )
+    probability = (
+        lgb_probability * lgb_weight + lstm_probability * lstm_weight
+    ) / total_weight
+    return {
+        "up_probability": round(probability, 6),
+        "direction": direction_from_probability(probability),
+        "confidence": confidence_from_probability(probability),
+    }
 
 
 def _monthly_signal(frame: pd.DataFrame) -> tuple[dict[str, Any], int]:
@@ -202,11 +366,11 @@ def _build_quant_payload(symbol: str, records: list[dict[str, Any]], as_of: str)
         payload = {
             "symbol": symbol,
             "as_of": as_of,
-            "model": "LSTM",
+            "model": "LSTM+LightGBM",
             "horizons": {key: _neutral_horizon() for key in ("5d", "15d", "1w", "1mo")},
             "backtest": {"walk_forward_auc": None, "sample_count": len(df)},
             "weekly_backtest": {"walk_forward_auc": None, "sample_count": 0},
-            "warnings": ["insufficient daily history for LSTM training"],
+            "warnings": ["insufficient daily history for LSTM+LightGBM training"],
         }
         return json_dumps(payload)
 
@@ -217,14 +381,28 @@ def _build_quant_payload(symbol: str, records: list[dict[str, Any]], as_of: str)
 
     for horizon in DAILY_HORIZONS:
         target = f"target_{horizon}d"
-        horizons[f"{horizon}d"] = _lstm_signal(
+        lgb_probability = _lightgbm_probability(df, target, DAILY_MIN_TRAIN)
+        lstm_probability = _lstm_probability(
             df, target, DAILY_MIN_TRAIN, DAILY_SEQ_LEN, DAILY_EPOCHS
         )
-        auc, sample_count = _lstm_walk_forward(
+        lgb_auc, lgb_n, lgb_y_true, lgb_y_pred = _lightgbm_walk_forward(
+            df, target, DAILY_MIN_TRAIN, DAILY_VALIDATION
+        )
+        lstm_auc, lstm_n, lstm_y_true, lstm_y_pred = _lstm_walk_forward(
             df, target, DAILY_MIN_TRAIN, DAILY_VALIDATION, DAILY_SEQ_LEN, DAILY_EPOCHS
         )
-        daily_aucs.append(auc)
-        if sample_count < DAILY_MIN_TRAIN:
+        lgb_calibration = _fit_calibration(lgb_y_true, lgb_y_pred)
+        lstm_calibration = _fit_calibration(lstm_y_true, lstm_y_pred)
+        horizons[f"{horizon}d"] = _ensemble_signal(
+            lgb_probability,
+            lstm_probability,
+            lgb_auc,
+            lstm_auc,
+            lgb_calibration,
+            lstm_calibration,
+        )
+        daily_aucs.append(round((lgb_auc + lstm_auc) / 2, 6))
+        if lgb_n < DAILY_MIN_TRAIN or lstm_n < DAILY_MIN_TRAIN:
             warnings.append(f"{horizon}d horizon has fewer than {DAILY_MIN_TRAIN} usable rows")
 
     daily_auc = round(float(sum(daily_aucs) / len(daily_aucs)), 6)
@@ -232,25 +410,34 @@ def _build_quant_payload(symbol: str, records: list[dict[str, Any]], as_of: str)
     weekly = _period_features(records, "W-FRI")
     if len(weekly) >= WEEKLY_MIN_TRAIN:
         weekly = _add_shift_target(weekly, "target_1w", 1)
-        horizons["1w"] = _lstm_signal(
+        lgb_probability = _lightgbm_probability(weekly, "target_1w", WEEKLY_MIN_TRAIN)
+        lstm_probability = _lstm_probability(
             weekly, "target_1w", WEEKLY_MIN_TRAIN, WEEKLY_SEQ_LEN, WEEKLY_EPOCHS
         )
-        weekly_auc, weekly_samples = _lstm_walk_forward(
-            weekly,
-            "target_1w",
-            WEEKLY_MIN_TRAIN,
-            WEEKLY_VALIDATION,
-            WEEKLY_SEQ_LEN,
-            WEEKLY_EPOCHS,
+        lgb_auc, _, lgb_y_true, lgb_y_pred = _lightgbm_walk_forward(
+            weekly, "target_1w", WEEKLY_MIN_TRAIN, WEEKLY_VALIDATION
+        )
+        lstm_auc, weekly_samples, lstm_y_true, lstm_y_pred = _lstm_walk_forward(
+            weekly, "target_1w", WEEKLY_MIN_TRAIN, WEEKLY_VALIDATION, WEEKLY_SEQ_LEN, WEEKLY_EPOCHS
+        )
+        lgb_calibration = _fit_calibration(lgb_y_true, lgb_y_pred)
+        lstm_calibration = _fit_calibration(lstm_y_true, lstm_y_pred)
+        horizons["1w"] = _ensemble_signal(
+            lgb_probability,
+            lstm_probability,
+            lgb_auc,
+            lstm_auc,
+            lgb_calibration,
+            lstm_calibration,
         )
         weekly_backtest = {
-            "walk_forward_auc": weekly_auc,
+            "walk_forward_auc": round((lgb_auc + lstm_auc) / 2, 6),
             "sample_count": int(len(weekly)),
         }
     else:
         horizons["1w"] = _neutral_horizon()
         weekly_backtest = {"walk_forward_auc": None, "sample_count": int(len(weekly))}
-        warnings.append("insufficient weekly history for LSTM training")
+        warnings.append("insufficient weekly history for LSTM+LightGBM training")
 
     monthly = _period_ohlcv(records, "ME")
     monthly_signal, monthly_samples = _monthly_signal(monthly)
@@ -261,7 +448,7 @@ def _build_quant_payload(symbol: str, records: list[dict[str, Any]], as_of: str)
     payload = {
         "symbol": symbol,
         "as_of": as_of,
-        "model": "LSTM",
+        "model": "LSTM+LightGBM",
         "horizons": horizons,
         "backtest": {"walk_forward_auc": daily_auc, "sample_count": int(len(df))},
         "weekly_backtest": weekly_backtest,

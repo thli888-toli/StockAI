@@ -53,7 +53,7 @@ class RemoteAgentClient:
             except (httpx.HTTPError, RuntimeError) as exc:
                 last_error = exc
                 if attempt < self.max_retries:
-                    await asyncio.sleep(0.2 * (2**attempt))
+                    await asyncio.sleep(1.0 * (2**attempt))
         message = str(last_error) or type(last_error).__name__
         raise RuntimeError(f"agent '{agent_name}' call failed: {message}") from last_error
 
