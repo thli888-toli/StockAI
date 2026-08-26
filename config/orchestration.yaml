@@ -22,6 +22,13 @@ nodes:
       query: "{query}"
       market_data: "{market_data}"
     output_key: quant
+  stock_fundamental:
+    type: agent
+    agent: stock_fundamental
+    input:
+      query: "{query}"
+      market_data: "{market_data}"
+    output_key: fundamental
   stock_analyst:
     type: agent
     agent: stock_analyst
@@ -30,12 +37,19 @@ nodes:
       market_data: "{market_data}"
       news: "{news}"
       quant: "{quant}"
+      fundamental: "{fundamental}"
     output_key: report
 edges:
   - from: stock_data
     to: stock_news
-  - from: stock_news
+  - from: stock_data
     to: stock_quant
+  - from: stock_data
+    to: stock_fundamental
+  - from: stock_fundamental
+    to: stock_analyst
+  - from: stock_news
+    to: stock_analyst
   - from: stock_quant
     to: stock_analyst
   - from: stock_analyst

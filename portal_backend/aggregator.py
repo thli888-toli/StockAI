@@ -82,6 +82,6 @@ class PortalAggregator:
             for run in runs:
                 self.store.upsert_run(run)
             known_ids = {run["run_id"] for run in runs}
-            self.store.mark_stale_running_runs_failed(known_ids)
+            self.store.mark_orphaned_running_runs_failed(known_ids)
         except Exception:
             pass

@@ -88,14 +88,16 @@ class GraphCompiler:
                 artifact = await self.agent_client.run(spec.agent, request)
             except Exception as exc:
                 error = f"agent node '{node_id}' failed: {exc}"
-                events = list(state.get("events", []))
-                events.append({"node": node_id, "event": "failed", "error": error})
-                return {"error": error, "events": events}
+                return {
+                    "error": error,
+                    "events": [{"node": node_id, "event": "failed", "error": error}],
+                }
 
             outputs[output_key] = artifact
-            events = list(state.get("events", []))
-            events.append({"node": node_id, "event": "completed", "output_key": output_key})
-            return {"outputs": outputs, "events": events}
+            return {
+                "outputs": {output_key: artifact},
+                "events": [{"node": node_id, "event": "completed", "output_key": output_key}],
+            }
 
         return node_fn
 
@@ -155,9 +157,11 @@ class GraphCompiler:
 
             if steps >= self.max_steps:
                 decision = "finish"
-            events = list(state.get("events", []))
-            events.append({"node": node_id, "event": "supervisor", "decision": decision, "step": steps})
-            return {"next": decision, "steps": steps, "events": events}
+            return {
+                "next": decision,
+                "steps": steps,
+                "events": [{"node": node_id, "event": "supervisor", "decision": decision, "step": steps}],
+            }
 
         return node_fn
 

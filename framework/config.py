@@ -77,3 +77,26 @@ CHECKPOINT_DB = os.getenv("CHECKPOINT_DB", "state/orchestrator.db")
 PORTAL_DB = os.getenv("PORTAL_DB", "state/portal.db")
 STOCK_CACHE_DB = os.getenv("STOCK_CACHE_DB", "state/stock_cache.db")
 STOCK_PORTAL_DB = os.getenv("STOCK_PORTAL_DB", "state/stock_portal.db")
+RUN_QUEUE_DB = os.getenv("RUN_QUEUE_DB", "state/orchestrator_queue.db")
+
+
+def load_runtime_config() -> dict:
+    import yaml
+
+    path = Path(__file__).resolve().parents[1] / "config" / "runtime.yaml"
+    if not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data or {}
+
+
+RUNTIME_CONFIG = load_runtime_config()
+ORCHESTRATOR_MAX_RUNNING_RUNS = int(
+    RUNTIME_CONFIG.get("orchestrator", {}).get("max_running_runs", 6)
+)
+ORCHESTRATOR_QUEUE_CHECK_INTERVAL = float(
+    RUNTIME_CONFIG.get("orchestrator", {}).get("queue_check_interval_seconds", 1.0)
+)

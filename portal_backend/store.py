@@ -121,7 +121,9 @@ class PortalStore:
     def insert_logs(self, records: list[dict[str, Any]]) -> None:
         rows = []
         for record in records:
-            extra = record.get("extra") or {}
+            extra = dict(record.get("extra") or {})
+            if record.get("exception"):
+                extra["exception"] = record["exception"]
             rows.append(
                 (
                     record.get("timestamp") or _now(),
@@ -171,28 +173,16 @@ class PortalStore:
                 ),
             )
 
-    def mark_stale_running_runs_failed(self, known_run_ids: set[str], timeout_seconds: float = 120.0) -> None:
-        from datetime import datetime, timezone
-
+    def mark_orphaned_running_runs_failed(self, known_run_ids: set[str]) -> None:
+        """Mark a stored 'running' run failed only when it disappeared from the orchestrator."""
         with self.lock:
             rows = self.conn.execute(
-                "SELECT run_id, updated_at FROM runs WHERE status='running'"
+                "SELECT run_id FROM runs WHERE status='running'"
             ).fetchall()
-        now = datetime.now(timezone.utc)
-        for row in rows:
-            updated = row["updated_at"]
-            stale = False
-            try:
-                updated_dt = datetime.fromisoformat(updated)
-                if updated_dt.tzinfo is None:
-                    updated_dt = updated_dt.replace(tzinfo=timezone.utc)
-                stale = (now - updated_dt).total_seconds() > timeout_seconds
-            except Exception:
-                stale = True
-            if row["run_id"] not in known_run_ids or stale:
-                with self.lock, self.conn:
+            for row in rows:
+                if row["run_id"] not in known_run_ids:
                     self.conn.execute(
-                        "UPDATE runs SET status='failed', error='stale running run reconciled' WHERE run_id=?",
+                        "UPDATE runs SET status='failed', error='run no longer present in orchestrator' WHERE run_id=?",
                         (row["run_id"],),
                     )
 

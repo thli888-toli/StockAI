@@ -18,13 +18,16 @@
                  │                       │                           │
                  └───────────┬───────────┴───────────────────────────┘
                              ▼
+                     stock_fundamental :8025
+                             │
+                             ▼
                      stock_analyst :8023
                              │
                              ▼
                    final report + summary
 ```
 
-编排流：`stock_data -> stock_news -> stock_quant -> stock_analyst`。
+编排流：`stock_data -> stock_news -> stock_quant -> stock_analyst`，以及 `stock_data -> stock_fundamental -> stock_analyst`。
 
 ## 3. Components
 
@@ -48,6 +51,7 @@
 | `stock_data` | `plugins/stock_data` | AkShare 日线、增量缓存、公司信息、MACD/RSI/MA/特征矩阵 |
 | `stock_news` | `plugins/stock_news` | 东方财富、巨潮、财联社/同花顺，交叉验证 |
 | `stock_quant` | `plugins/stock_quant` | LSTM 日/周预测、月线技术趋势、持久化量化缓存 |
+| `stock_fundamental` | `plugins/stock_fundamental` | 近一年财报三大报表/财务指标/估值分位/行业对比/业绩预告，多方法（相对估值+DCF+股息折现）估算合理股价区间 |
 | `stock_analyst` | `plugins/stock_analyst` | LLM 中文报告 + summary，与量化信号交叉验证 |
 
 共享逻辑：
@@ -70,7 +74,7 @@
 
 | 文件 | 用途 |
 |---|---|
-| `state/stock_cache.db` | `stock_history_bars`、`stock_history_meta`、`quant_cache` |
+| `state/stock_cache.db` | `stock_history_bars`、`stock_history_meta`、`quant_cache`、`fundamental_cache` |
 | `state/orchestrator.db` | LangGraph checkpoints（WAL） |
 | `state/portal.db` | 监控门户 agents/metrics/logs/runs |
 | `state/stock_portal.db` | `users`、`sessions`、`watchlist` |
@@ -81,7 +85,8 @@
 2. `stock_data` 检查历史缓存，缺失区间拉取 AkShare，计算特征矩阵并回写。
 3. `stock_news` 抓取并交叉验证新闻。
 4. `stock_quant` 计算特征哈希，命中缓存直接返回；否则训练 LSTM 日/周模型并计算月线技术趋势，写入缓存。
-5. `stock_analyst` 组装市场数据、新闻、量化结果，调用 DeepSeek 生成 `report` 与 `summary`；失败则确定性回退。
+5. `stock_fundamental` 抓取三大报表、财务指标、估值快照/历史分位/行业对比/业绩预告，通过内置工具层与多方法估值输出 `analysis`、`report_section`、`summary`。
+6. `stock_analyst` 组装市场数据、新闻、量化结果与基本面估值，调用 DeepSeek 生成 `report` 与 `summary`；失败则确定性回退。
 6. 门户轮询 orchestrator run 状态，完成后展示报告；图表接口从 `outputs` 读取市场数据与量化结果渲染。
 
 ## 5. Quant Model Details

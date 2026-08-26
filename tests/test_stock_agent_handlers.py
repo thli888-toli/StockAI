@@ -212,3 +212,72 @@ async def test_stock_analyst_handler_llm_configured_path(monkeypatch):
 
     assert "# LLM report" in result
     assert "免责声明" in result
+
+
+@pytest.mark.asyncio
+async def test_stock_analyst_handler_embeds_fundamental_section(monkeypatch):
+    monkeypatch.setattr("plugins.stock_analyst.service.llm_configured", lambda: False)
+    fundamental = {
+        "report_section": (
+            "## 基本面与估值（贵州茅台 600519）\n"
+            "- 合理股价估算（多方法综合）：区间 1000.00–1250.00 元，中枢 1100.00 元。"
+        ),
+        "summary": {"valuation_verdict": "低估"},
+    }
+    result = await StockAnalystHandler().run(
+        TaskRequest(
+            query="600519",
+            inputs={
+                "market_data": json.dumps(
+                    {
+                        "symbol": "600519",
+                        "company_name": "贵州茅台",
+                        "industry": "白酒",
+                        "macd": {"daily": {"trend": "bullish"}},
+                    }
+                ),
+                "news": json.dumps({"source_counts": {}, "warnings": []}),
+                "quant": json.dumps(
+                    {
+                        "horizons": {
+                            "5d": {"direction": "up", "up_probability": 0.6, "confidence": 0.2},
+                            "15d": {"direction": "up", "up_probability": 0.6, "confidence": 0.2},
+                            "1w": {"direction": "flat", "up_probability": 0.5, "confidence": 0.0},
+                            "1mo": {"direction": "up", "up_probability": 0.7, "confidence": 0.4},
+                        },
+                        "backtest": {},
+                    }
+                ),
+                "fundamental": json.dumps(fundamental),
+            },
+        )
+    )
+    assert "## 基本面与估值（贵州茅台 600519）" in result
+    assert "中枢 1100.00 元" in result
+
+
+@pytest.mark.asyncio
+async def test_stock_analyst_handler_fundamental_missing_placeholder(monkeypatch):
+    monkeypatch.setattr("plugins.stock_analyst.service.llm_configured", lambda: False)
+    result = await StockAnalystHandler().run(
+        TaskRequest(
+            query="600519",
+            inputs={
+                "market_data": json.dumps({"symbol": "600519", "macd": {}}),
+                "news": json.dumps({"source_counts": {}, "warnings": []}),
+                "quant": json.dumps(
+                    {
+                        "horizons": {
+                            "5d": {"direction": "up", "up_probability": 0.6, "confidence": 0.2},
+                            "15d": {"direction": "up", "up_probability": 0.6, "confidence": 0.2},
+                            "1w": {"direction": "flat", "up_probability": 0.5, "confidence": 0.0},
+                            "1mo": {"direction": "up", "up_probability": 0.7, "confidence": 0.4},
+                        },
+                        "backtest": {},
+                    }
+                ),
+            },
+        )
+    )
+    assert "## 基本面与估值" in result
+    assert "基本面数据暂不可用" in result

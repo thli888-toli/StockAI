@@ -133,6 +133,56 @@ def _summary_from_report(report: Any) -> dict[str, Any] | None:
     return {"overall": overall, "text": str(summary.get("text") or "")}
 
 
+def _fundamental_from_outputs(outputs: dict[str, Any]) -> dict[str, Any] | None:
+    """Extract the fair-value mid price and current-price deviation for charts."""
+    fundamental = outputs.get("fundamental")
+    if isinstance(fundamental, str):
+        try:
+            fundamental = json.loads(fundamental)
+        except Exception:
+            return None
+    if not isinstance(fundamental, dict):
+        return None
+    analysis = fundamental.get("analysis") or {}
+    if not isinstance(analysis, dict):
+        return None
+    valuation = analysis.get("valuation") or {}
+    if not isinstance(valuation, dict):
+        return None
+    fair_value = valuation.get("fair_value_range") or {}
+    if not isinstance(fair_value, dict) or fair_value.get("mid") is None:
+        return None
+
+    mid_price = float(fair_value["mid"])
+    metrics = analysis.get("metrics") or {}
+    current_price = metrics.get("current_price")
+    current = float(current_price) if current_price is not None else None
+    deviation_pct = None
+    if current is not None and mid_price:
+        deviation_pct = round((current - mid_price) / mid_price * 100.0, 2)
+    verdict = valuation.get("verdict") or {}
+    return {
+        "mid_price": round(mid_price, 2),
+        "low": (
+            round(float(fair_value["low"]), 2)
+            if fair_value.get("low") is not None
+            else None
+        ),
+        "high": (
+            round(float(fair_value["high"]), 2)
+            if fair_value.get("high") is not None
+            else None
+        ),
+        "current_price": round(current, 2) if current is not None else None,
+        "deviation_pct": deviation_pct,
+        "verdict": (
+            str(verdict.get("label") or "")
+            if isinstance(verdict, dict)
+            else ""
+        ),
+    }
+
+
 def _build_chart_payload(
     symbol: str,
     market_data: dict[str, Any],
@@ -257,7 +307,7 @@ def _create_run(orchestrator_url: str, symbol: str) -> dict[str, Any]:
         response = httpx.post(
             f"{base}/runs",
             json={"query": symbol},
-            timeout=10.0,
+            timeout=60.0,
         )
     except httpx.HTTPError as exc:
         return {
@@ -508,6 +558,7 @@ def create_stock_portal_app(
         if payload is None:
             raise HTTPException(status_code=404, detail="market data not available yet")
         payload["llm_summary"] = _summary_from_report((item.get("outputs") or {}).get("report"))
+        payload["fundamental"] = _fundamental_from_outputs(item.get("outputs") or {})
         return payload
 
     dist_dir = Path(__file__).resolve().parent / "ui" / "dist"

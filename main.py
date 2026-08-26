@@ -19,6 +19,21 @@ def build_parser() -> argparse.ArgumentParser:
     orch_parser = sub.add_parser("orchestrator", help="Run the orchestrator")
     orch_parser.add_argument("--manifest", default="config/orchestration.yaml")
 
+    refresh_parser = sub.add_parser(
+        "refresh-reports",
+        help="Refresh backend stock reports for a list of symbols (bypasses portal same-day dedupe)",
+    )
+    refresh_parser.add_argument("--symbols", default=None)
+    refresh_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Refresh every distinct symbol registered in the watchlist DB across all users",
+    )
+    refresh_parser.add_argument("--orchestrator", default=None)
+    refresh_parser.add_argument("--db", default=None)
+    refresh_parser.add_argument("--timeout", type=float, default=600.0)
+    refresh_parser.add_argument("--poll-interval", type=float, default=1.0)
+
     sub.add_parser("portal", help="Run the portal backend and serve the built UI")
 
     sub.add_parser("stockportal", help="Run the dedicated stock analysis portal")
@@ -37,6 +52,20 @@ def main() -> int:
         run_agent(args.manifest)
     elif args.command == "orchestrator":
         run_orchestrator(args.manifest)
+    elif args.command == "refresh-reports":
+        from framework.config import ORCHESTRATOR_URL, STOCK_PORTAL_DB
+        from stockportal.refresh_reports import run_cli
+
+        if not args.all and not args.symbols:
+            refresh_parser.error("either --symbols or --all is required")
+        return run_cli(
+            args.symbols,
+            args.all,
+            args.orchestrator or ORCHESTRATOR_URL,
+            args.db or STOCK_PORTAL_DB,
+            args.timeout,
+            args.poll_interval,
+        )
     elif args.command == "portal":
         run_portal_backend()
     elif args.command == "stockportal":

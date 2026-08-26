@@ -70,7 +70,9 @@ export default function App() {
   }, [refreshList]);
 
   useEffect(() => {
-    const anyRunning = items.some((item) => item.status === "running");
+    const anyRunning = items.some(
+      (item) => item.status === "running" || item.status === "queued"
+    );
     if (anyRunning) startPolling();
     else stopPolling();
   }, [items]);
@@ -88,6 +90,9 @@ export default function App() {
       if ("already_exists" in item) {
         setError(item.message);
         return;
+      }
+      if (item.status === "failed" && item.error) {
+        setError(item.error);
       }
       setItems((prev) => [item, ...prev.filter((existing) => existing.symbol !== item.symbol)]);
       setSymbol("");
@@ -125,6 +130,9 @@ export default function App() {
       if ("already_generated" in item) {
         setError(item.message);
         return;
+      }
+      if (item.status === "failed" && item.error) {
+        setError(item.error);
       }
       setItems((prev) => prev.map((existing) => (existing.symbol === item.symbol ? item : existing)));
       await refreshList();
@@ -210,11 +218,21 @@ export default function App() {
                   <strong>{item.symbol}</strong>
                   {item.company_name && <span>{item.company_name}</span>}
                   {item.industry && <span className="muted">{item.industry}</span>}
-                  <span className={`status status-${item.status}`}>{item.status}</span>
+                  <span className={`status status-${item.status}`}>
+                    {item.status === "queued"
+                      ? "排队中"
+                      : item.status === "running"
+                        ? "分析中"
+                        : item.status === "completed"
+                          ? "已完成"
+                          : "失败"}
+                  </span>
                 </div>
                 <div className="watchlist-actions">
-                  {item.status === "running" && (
-                    <span className="muted">分析中...</span>
+                  {(item.status === "running" || item.status === "queued") && (
+                    <span className="muted">
+                      {item.status === "queued" ? "排队中..." : "分析中..."}
+                    </span>
                   )}
                   {item.status === "completed" && (
                     <button onClick={() => setModal({ kind: "report", item })}>

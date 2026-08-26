@@ -4,13 +4,27 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _merge_outputs(left: dict[str, Any] | None, right: dict[str, Any] | None) -> dict[str, Any]:
+    merged = dict(left or {})
+    merged.update(right or {})
+    return merged
+
+
+def _merge_events(left: list[dict[str, Any]] | None, right: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    return (left or []) + (right or [])
+
+
+def _merge_error(left: str | None, right: str | None) -> str | None:
+    return left or right
 
 
 class TaskState(StrEnum):
@@ -167,17 +181,17 @@ class OrchestrationState(TypedDict, total=False):
     run_id: str
     query: str
     context: str
-    outputs: dict[str, Any]
+    outputs: Annotated[dict[str, Any], _merge_outputs]
     next: str
     steps: int
-    error: str
-    events: list[dict[str, Any]]
+    error: Annotated[str | None, _merge_error]
+    events: Annotated[list[dict[str, Any]], _merge_events]
 
 
 class RunSummary(BaseModel):
     run_id: str
     graph_config: str | None = None
-    status: Literal["running", "completed", "failed"] = "running"
+    status: Literal["queued", "running", "completed", "failed"] = "queued"
     query: str
     outputs: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None

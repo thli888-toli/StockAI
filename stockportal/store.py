@@ -175,6 +175,15 @@ class WatchlistStore:
             ).fetchall()
         return [self._item_from_row(row) for row in rows]
 
+    def all_by_symbol(self, symbol: str) -> list[dict[str, Any]]:
+        """Return every watchlist row for a symbol across all users."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM watchlist WHERE symbol=? ORDER BY created_at DESC",
+                (symbol,),
+            ).fetchall()
+        return [self._item_from_row(row) for row in rows]
+
     def delete(self, user_id: str, symbol: str) -> bool:
         with self.lock, self.conn:
             cursor = self.conn.execute(

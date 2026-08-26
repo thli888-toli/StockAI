@@ -1,0 +1,7 @@
+symbols:
+  - "600988"
+cadence_trading_days: 5
+start_date: "2025-01-01"
+end_date: "2026-08-20"
+include_llm: true
+non_overlap: false

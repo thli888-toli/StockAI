@@ -79,6 +79,7 @@ def start_all(
         "plugins/stock_data/agent.yaml",
         "plugins/stock_news/agent.yaml",
         "plugins/stock_quant/agent.yaml",
+        "plugins/stock_fundamental/agent.yaml",
         "plugins/stock_analyst/agent.yaml",
     ]
     processes: list[subprocess.Popen] = []

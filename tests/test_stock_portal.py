@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import sqlite3
 from pathlib import Path
@@ -390,6 +391,88 @@ def test_summary_from_report_parses_json_and_falls_back_to_none():
     assert summary == {"overall": "bullish", "text": "偏多"}
     assert stock_portal_app._summary_from_report("# plain markdown") is None
     assert stock_portal_app._summary_from_report(None) is None
+
+
+def test_fundamental_from_outputs_parses_mid_and_deviation():
+    outputs = {
+        "fundamental": json.dumps(
+            {
+                "analysis": {
+                    "metrics": {"current_price": 13.54},
+                    "valuation": {
+                        "fair_value_range": {"low": 14.61, "mid": 14.9, "high": 15.2},
+                        "verdict": {"label": "合理"},
+                    },
+                }
+            }
+        )
+    }
+    info = stock_portal_app._fundamental_from_outputs(outputs)
+    assert info is not None
+    assert info["mid_price"] == 14.9
+    assert info["low"] == 14.61
+    assert info["high"] == 15.2
+    assert info["current_price"] == 13.54
+    assert info["deviation_pct"] == round((13.54 - 14.9) / 14.9 * 100, 2)
+    assert info["verdict"] == "合理"
+    assert stock_portal_app._fundamental_from_outputs({}) is None
+    assert stock_portal_app._fundamental_from_outputs({"fundamental": "not json"}) is None
+    assert (
+        stock_portal_app._fundamental_from_outputs(
+            {"fundamental": json.dumps({"analysis": {"valuation": {}}})}
+        )
+        is None
+    )
+
+
+def test_chart_endpoint_includes_fundamental_valuation(tmp_path):
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    close = pd.Series(range(100, 220), dtype="float64")
+    market_data = {
+        "daily_features": [
+            {
+                "date": day.strftime("%Y-%m-%d"),
+                "open": float(price - 1),
+                "high": float(price + 1),
+                "low": float(price - 2),
+                "close": float(price),
+                "volume": 1000.0,
+            }
+            for day, price in zip(dates, close)
+        ]
+    }
+    fundamental = {
+        "analysis": {
+            "metrics": {"current_price": 150.0},
+            "valuation": {
+                "fair_value_range": {"low": 140.0, "mid": 160.0, "high": 180.0},
+                "verdict": {"label": "低估"},
+            },
+        }
+    }
+    app = _make_app(tmp_path)
+    with TestClient(app) as client:
+        login = client.post("/api/login", json={"nickname": "chart_user"})
+        login_body = login.json()
+        store = WatchlistStore(tmp_path / "watchlist.db")
+        store.upsert(
+            login_body["user_id"],
+            "600988",
+            run_id="r1",
+            status="completed",
+            outputs={
+                "market_data": json.dumps(market_data),
+                "fundamental": json.dumps(fundamental),
+            },
+        )
+        headers = {"Authorization": f"Bearer {login_body['token']}"}
+        response = client.get("/api/watchlist/600988/chart", headers=headers)
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["fundamental"]["mid_price"] == 160.0
+    assert payload["fundamental"]["current_price"] == 150.0
+    assert payload["fundamental"]["deviation_pct"] == round((150 - 160) / 160 * 100, 2)
+    assert payload["fundamental"]["verdict"] == "低估"
 
 
 def test_fibonacci_levels_bracket_last_close():
