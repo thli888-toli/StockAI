@@ -86,15 +86,13 @@ def test_weekly_and_monthly_resampling_reduces_rows_and_preserves_ohlcv():
 
 def test_prepare_daily_features_has_required_columns_without_nan():
     features = prepare_daily_features(_daily_frame())
-    required = {
+    core = {
         "macd",
         "macd_signal",
         "macd_histogram",
         "rsi14",
         "ma20",
         "ma66",
-        "ma154",
-        "ma250",
         "volatility20",
         "volume_ratio",
         "return_1d",
@@ -102,11 +100,20 @@ def test_prepare_daily_features_has_required_columns_without_nan():
         "return_20d",
         "close_ma20_ratio",
         "close_ma66_ratio",
-        "close_ma154_ratio",
-        "close_ma250_ratio",
+        "atr14",
+        "bollinger_bandwidth",
+        "bollinger_pctb",
+        "close_high20_ratio",
+        "close_low20_ratio",
+        "amount_ratio",
     }
-    assert required.issubset(features.columns)
-    assert not features[list(required)].isna().any().any()
+    sparse = {"ma154", "ma250", "close_ma154_ratio", "close_ma250_ratio"}
+    assert core.issubset(features.columns)
+    assert sparse.issubset(features.columns)
+    assert not features[list(core)].isna().any().any()
+    # Short series leave long-window MA columns as NaN (not zero-filled), so
+    # training code can drop them instead of learning from constants.
+    assert features["close_ma250_ratio"].isna().all()
 
 
 def test_news_cross_validation_matches_only_when_title_and_date_align():
@@ -228,6 +235,152 @@ def test_monthly_signal_combines_macd_and_ma():
     tiny_signal, tiny_count = quant_service._monthly_signal(tiny_frame)
     assert tiny_count == 10
     assert tiny_signal["direction"] == "flat"
+
+
+def test_quant_uses_monthly_model_when_enough_monthly_history(monkeypatch):
+    from plugins.stock_quant import service as quant_service
+
+    monkeypatch.setattr(
+        quant_service,
+        "_lightgbm_probability",
+        lambda df, target, min_train: 0.65,
+    )
+    monkeypatch.setattr(
+        quant_service,
+        "_lstm_probability",
+        lambda df, target, min_train, seq_len, epochs: 0.55,
+    )
+    monkeypatch.setattr(
+        quant_service,
+        "_lightgbm_walk_forward",
+        lambda df, target, min_train, validation: (0.62, len(df), [], []),
+    )
+    monkeypatch.setattr(
+        quant_service,
+        "_lstm_walk_forward",
+        lambda df, target, min_train, validation, seq_len, epochs: (0.58, len(df), [], []),
+    )
+    monkeypatch.setattr(quant_service, "_fit_calibration", lambda y_true, y_pred: None)
+
+    daily = [{"close": float(index + 1)} for index in range(150)]
+    monthly = []
+    for index in range(90):
+        close = 10.0 + index
+        monthly.append(
+            {
+                "date": f"20{20 + index // 12:02d}-{index % 12 + 1:02d}-28",
+                "open": close - 1.0,
+                "high": close + 1.0,
+                "low": close - 2.0,
+                "close": close,
+                "volume": 1_000_000.0,
+            }
+        )
+    payload = json.loads(
+        quant_service._build_quant_payload("600519", daily, "2026-08-22", monthly)
+    )
+    assert payload["horizons"]["1mo"]["direction"] == "up"
+    assert payload["monthly_backtest"]["walk_forward_auc"] == 0.6
+    assert payload["monthly_backtest"]["sample_count"] == 71
+
+
+def test_quant_monthly_gate_uses_usable_feature_rows(monkeypatch):
+    from plugins.stock_quant import service as quant_service
+
+    def boom_prob(df, target, *args, **kwargs):
+        if target == "target_1mo":
+            raise AssertionError("monthly model should not train below usable threshold")
+        return 0.5
+
+    def boom_wf(df, target, *args, **kwargs):
+        if target == "target_1mo":
+            raise AssertionError("monthly model should not train below usable threshold")
+        return (0.5, len(df), [], [])
+
+    monkeypatch.setattr(quant_service, "_lightgbm_probability", boom_prob)
+    monkeypatch.setattr(quant_service, "_lstm_probability", boom_prob)
+    monkeypatch.setattr(quant_service, "_lightgbm_walk_forward", boom_wf)
+    monkeypatch.setattr(quant_service, "_lstm_walk_forward", boom_wf)
+    monkeypatch.setattr(quant_service, "_fit_calibration", lambda y_true, y_pred: None)
+    daily = [{"close": float(index + 1)} for index in range(150)]
+    # 73 raw monthly bars -> 54 feature rows -> 53 usable < 60 -> rule fallback
+    monthly = [
+        {
+            "date": f"20{20 + index // 12:02d}-{index % 12 + 1:02d}-28",
+            "open": 10.0 + index,
+            "high": 12.0 + index,
+            "low": 9.0 + index,
+            "close": 11.0 + index,
+            "volume": 1_000_000.0,
+        }
+        for index in range(73)
+    ]
+    payload = json.loads(
+        quant_service._build_quant_payload("600519", daily, "2026-08-22", monthly)
+    )
+    assert payload["monthly_backtest"]["walk_forward_auc"] is None
+    assert payload["monthly_backtest"]["sample_count"] == 73
+    assert any("insufficient monthly history" in warning for warning in payload["warnings"])
+
+
+def test_quant_falls_back_to_monthly_rule_when_insufficient_history(monkeypatch):
+    from plugins.stock_quant import service as quant_service
+
+    monkeypatch.setattr(
+        quant_service,
+        "_lightgbm_probability",
+        lambda df, target, min_train: 0.65,
+    )
+    monkeypatch.setattr(
+        quant_service,
+        "_lstm_probability",
+        lambda df, target, min_train, seq_len, epochs: 0.55,
+    )
+    daily = [{"close": float(index + 1)} for index in range(150)]
+    monthly = [
+        {
+            "date": f"20{20 + index // 12:02d}-{index % 12 + 1:02d}-28",
+            "open": 10.0 + index,
+            "high": 12.0 + index,
+            "low": 9.0 + index,
+            "close": 11.0 + index,
+            "volume": 1_000_000.0,
+        }
+        for index in range(30)
+    ]
+    payload = json.loads(
+        quant_service._build_quant_payload("600519", daily, "2026-08-22", monthly)
+    )
+    assert payload["horizons"]["1mo"]["direction"] == "up"
+    assert payload["horizons"]["1mo"]["up_probability"] == 0.7
+    assert payload["monthly_backtest"]["sample_count"] == 30
+    assert any("insufficient monthly history" in warning for warning in payload["warnings"])
+
+
+def test_usable_feature_columns_drops_sparse_long_ma():
+    from plugins.stock_quant import service as quant_service
+
+    features = prepare_daily_features(_daily_frame(rows=150))
+    columns = quant_service._usable_feature_columns(features)
+    assert "close_ma20_ratio" in columns
+    assert "atr14" in columns
+    assert "amount_ratio" in columns
+    assert "close_ma154_ratio" not in columns
+    assert "close_ma250_ratio" not in columns
+
+
+def test_run_blocking_timeout_has_readable_message():
+    import asyncio
+    import time as _time
+
+    from plugins.stock_common import run_blocking
+
+    async def go():
+        await run_blocking(lambda: _time.sleep(1.0), timeout=0.05, retries=0)
+
+    with pytest.raises(TimeoutError) as exc_info:
+        asyncio.run(go())
+    assert "秒" in str(exc_info.value)
 
 
 def test_quant_cache_store_roundtrip(tmp_path):

@@ -243,6 +243,7 @@ def _build_metrics(
     )
     if forecast_growth is None:
         forecast_growth = _guidance_growth(forecast.get("earnings_guidance") or [])
+    forecast_eps, forecast_year = _consensus_eps(forecast.get("research_reports") or [])
 
     valuation = {
         "pe_ttm": _num_or_none(snapshot.get("pe_ttm")),
@@ -278,16 +279,29 @@ def _build_metrics(
         "revenue_growth_cagr": revenue_growth_cagr,
         "revenue_growth_yoy": revenue_growth_yoy,
         "forecast_growth": forecast_growth,
+        "forecast_eps": forecast_eps,
+        "forecast_year": forecast_year,
         "valuation": valuation,
         "historical": {
             key: stats for key, stats in (historical.get("metrics") or {}).items()
         },
-        "industry": {
-            key: value
-            for key, value in industry_comparison.items()
-            if key in ("pe", "pb", "ps")
-        },
+        "industry_peers": industry_comparison.get("peers") or {},
+        "industry_bench": industry_comparison.get("industry") or {},
     }
+
+
+def _consensus_eps(reports: list[dict[str, Any]]) -> tuple[float | None, int | None]:
+    """Median consensus EPS for the current year, falling back to next year."""
+    year = date.today().year
+    for offset in (0, 1):
+        values = [
+            float(item[f"eps_{year + offset}"])
+            for item in reports
+            if item.get(f"eps_{year + offset}") is not None
+        ]
+        if values:
+            return float(statistics.median(values)), year + offset
+    return None, None
 
 
 def _num_or_none(value: Any) -> float | None:
@@ -313,7 +327,9 @@ def _data_quality(metrics: dict[str, Any], valuation: dict[str, Any], warnings: 
             "roe": metrics.get("roe"),
             "growth": metrics.get("revenue_growth_cagr") or metrics.get("forecast_growth"),
             "historical_percentile": bool(metrics.get("historical")),
-            "industry_comparison": bool(metrics.get("industry")),
+            "industry_comparison": bool(
+                metrics.get("industry_peers") or metrics.get("industry_bench")
+            ),
             "forecast": metrics.get("forecast_growth"),
         }.items()
         if not value
@@ -397,17 +413,38 @@ def _build_report_section(analysis: dict[str, Any]) -> str:
         if snapshot.get("pb") is not None
         else "—"
     )
-    industry_pe = (metrics.get("industry") or {}).get("pe") or {}
+    peers = metrics.get("industry_peers") or {}
+    bench = metrics.get("industry_bench") or {}
+    industry_pe = (peers.get("pe") or bench.get("pe")) or {}
     industry_text = _fmt_price(industry_pe.get("median")) if industry_pe.get("median") is not None else "—"
+    if (peers.get("pe") or {}).get("median") is not None:
+        if peers.get("source") == "manual":
+            pe_bench_label = "手动指定类似公司PE中位数"
+        elif peers.get("source") == "llm":
+            pe_bench_label = "大模型建议类似公司PE中位数"
+        else:
+            pe_bench_label = "类似公司PE中位数"
+    else:
+        pe_bench_label = "行业PE中位数"
     lines.append(
         f"- 估值水平：PE-TTM {pe_text}，PB {pb_text}，"
-        f"PS {_fmt_price(snapshot.get('ps'))}；行业PE中位数 {industry_text}。"
+        f"PS {_fmt_price(snapshot.get('ps'))}；{pe_bench_label} {industry_text}。"
     )
 
     fair_value = valuation.get("fair_value_range")
-    if fair_value:
+    verdict = valuation.get("verdict") or {}
+    if verdict.get("label") == "重组/注入中":
+        lines.append(
+            "- 估值说明：疑似重组/资产注入中，当前报表的每股净资产与每股营收相对市值严重偏低，"
+            "相对估值不适用，暂不给出估值中枢。"
+        )
+        if metrics.get("current_price") is not None:
+            lines.append(
+                f"- 当前股价 {_fmt_price(metrics.get('current_price'))} 元，"
+                "判断：重组/注入中（相对估值不适用）。"
+            )
+    elif fair_value:
         low, mid, high = fair_value["low"], fair_value["mid"], fair_value["high"]
-        verdict = valuation.get("verdict") or {}
         method_names = {"relative": "相对估值", "dcf": "DCF", "ddm": "股息折现"}
         used_names = [
             method_names.get(name, name)
@@ -428,14 +465,18 @@ def _build_report_section(analysis: dict[str, Any]) -> str:
         dcf = per_method.get("dcf") or {}
         ddm = per_method.get("ddm") or {}
         if relative.get("available"):
-            sources = "、".join(
-                dict.fromkeys(
-                    str(item.get("target_source"))
-                    for item in (relative.get("detail") or [])
-                    if item.get("target_source")
-                )
-            ) or "历史/行业倍数"
-            lines.append(f"  - 相对估值：{_fmt_price(relative.get('price'))} 元（目标倍数：{sources}）。")
+            basis = str(relative.get("basis") or "历史/行业倍数")
+            peer_names = relative.get("peer_names") or []
+            peer_text = ""
+            if "类似公司" in basis and peer_names:
+                shown = "、".join(peer_names[:10])
+                if len(peer_names) > 10:
+                    shown += "等"
+                peer_text = f"（类似公司：{shown}，共{len(peer_names)}家）"
+            lines.append(
+                f"  - 相对估值：{_fmt_price(relative.get('price'))} 元"
+                f"（目标倍数：{basis}{peer_text}）。"
+            )
         if dcf.get("available"):
             lines.append(
                 f"  - DCF：{_fmt_price(dcf.get('price'))} 元"

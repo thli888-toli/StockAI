@@ -60,5 +60,23 @@ export const api = {
   removeWatchlist: (symbol: string) =>
     request<{ deleted: boolean }>(`/api/watchlist/${encodeURIComponent(symbol)}`, {
       method: "DELETE"
-    })
+    }),
+  saveChart: (symbol: string, period: string) =>
+    request<{ id: number; period: string; label: string; saved_at: string }>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/chart/save`,
+      { method: "POST", body: JSON.stringify({ period }) }
+    ),
+  listChartSnapshots: (symbol: string) =>
+    request<{ id: number; period: string; label: string; saved_at: string }[]>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/charts`
+    ),
+  getChartSnapshot: (symbol: string, id: number) =>
+    request<Record<string, unknown> & { payload: unknown }>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/charts/${id}`
+    ),
+  deleteChartSnapshot: (symbol: string, id: number) =>
+    request<{ deleted: boolean }>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/charts/${id}`,
+      { method: "DELETE" }
+    )
 };

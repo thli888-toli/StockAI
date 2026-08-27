@@ -61,15 +61,14 @@ python -m main run
 
 ## 后端刷新工具
 
-`refresh-reports` 在后台直接为指定的股票列表重新生成分析报告（绕过门户的"同日已生成"拦截），并把结果写回所有包含这些股票的用户股票池，无需打开门户操作。可用于批量刷新或改动后的快速验证。
+`refresh-reports` 在后台直接为指定的股票列表提交分析任务（绕过门户的"同日已生成"拦截），并把每个用户股票池中对应股票的 `run_id` 指向新任务。CLI 只负责提交，不等待最终结果；完成后由门户在用户打开时从 orchestrator 同步最新结果。可用于批量刷新或改动后的快速验证。
 
 ```powershell
 python -m main refresh-reports --symbols 600519,300024
 python -m main refresh-reports --all
-python -m main refresh-reports --symbols 600519,300024 --timeout 900
 ```
 
-`--symbols` 刷新指定股票；`--all` 刷新 watchlist 数据库中所有去重后的股票（跨全部用户，无论谁在关注），适合批量重跑。所有 run 会一次性并行提交给 orchestrator，由它的内部队列（默认最多 6 个并发）控制执行节奏，CLI 再统一轮询写回，因此大批量刷新也只需要等待总耗时。可选参数：`--orchestrator`（默认 `http://127.0.0.1:8020`）、`--db`（默认 `state/stock_portal.db`）、`--timeout`（单只股票从开始执行起的超时秒数，默认 600，不含排队等待）、`--poll-interval`（轮询间隔秒数，默认 1）。要求 registry、各 agent 与 orchestrator 服务已启动；退出码 0 表示全部成功。
+`--symbols` 刷新指定股票；`--all` 刷新 watchlist 数据库中所有去重后的股票（跨全部用户，无论谁在关注），适合批量重跑。所有 run 会一次性并行提交给 orchestrator，由它的内部队列（默认最多 6 个并发）控制执行节奏。可选参数：`--orchestrator`（默认 `http://127.0.0.1:8020`）、`--db`（默认 `state/stock_portal.db`）。要求 registry、各 agent 与 orchestrator 服务已启动；退出码 0 表示全部提交成功。
 
 ## 关键能力
 
@@ -78,7 +77,7 @@ python -m main refresh-reports --symbols 600519,300024 --timeout 900
 - 量化：LSTM 日线 `5d/15d`、周线 `1w`；月线 `1mo` 采用 MACD + 均线确定性趋势。
 - 基本面：三大报表 + 财务指标 + 估值快照/历史分位/行业对比/业绩预告，输出合理股价区间。
 - 分析报告：DeepSeek-V4-Pro 输出纯中文 Markdown + 结构化结论 `summary`。
-- 图表：日/周/月 K 线、MACD(6,13,5)、MA(20/66/154/250)、斐波那契支撑阻力、趋势箭头、LLM 观点。
+- 图表：日/周/月 K 线、MACD(6,13,5)、MA(20/66/154/250)、斐波那契支撑阻力、趋势箭头、LLM 观点、估值中枢；支持“保存此图表”和历史 K 线并排对比。
 - 多用户：模拟微信登录，每个用户独立股票池；同日重复分析会被拦截。
 - 持久化：SQLite 保存历史行情、量化缓存、用户/会话、股票池和运行记录。
 
@@ -88,7 +87,7 @@ python -m main refresh-reports --symbols 600519,300024 --timeout 900
 
 ```text
 DEEPSEEK_MODEL=deepseek-v4-pro
-RUN_TIMEOUT_SECONDS=600
+RUN_TIMEOUT_SECONDS=1800
 ```
 
 可通过 `DEEPSEEK_MODEL` 切换为 `deepseek-v4-flash` 或 OpenAI 兼容模型；未配置 LLM 时分析师回退到确定性中文报告。

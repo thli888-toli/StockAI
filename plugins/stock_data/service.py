@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
+import pandas as pd
+
 from framework.config import STOCK_CACHE_DB
 from plugins.stock_cache import StockHistoryStore
 from plugins.stock_common import (
@@ -20,6 +22,7 @@ from framework.schemas import TaskRequest
 
 
 LOOKBACK_YEARS = 3
+MONTHLY_LOOKBACK_YEARS = 10
 DATA_CACHE = TTLCache(ttl_seconds=900)
 
 
@@ -144,9 +147,94 @@ class StockDataHandler:
             "close_ma66_ratio",
             "close_ma154_ratio",
             "close_ma250_ratio",
+            "atr14",
+            "bollinger_bandwidth",
+            "bollinger_pctb",
+            "close_high20_ratio",
+            "close_low20_ratio",
+            "amount_ratio",
         ]
         features = daily[feature_columns].copy()
         features["date"] = features["date"].dt.strftime("%Y-%m-%d")
+
+        monthly_history_store = StockHistoryStore(
+            STOCK_CACHE_DB,
+            table="stock_monthly_history",
+            meta_table="stock_monthly_history_meta",
+        )
+        monthly_start = end_date - timedelta(days=365 * MONTHLY_LOOKBACK_YEARS)
+        monthly_start_str = monthly_start.isoformat()
+        monthly_missing = await run_blocking(
+            monthly_history_store.missing_ranges,
+            symbol,
+            "qfq",
+            monthly_start_str,
+            end_str,
+            timeout=5.0,
+            retries=0,
+        )
+        for fetch_start, fetch_end in monthly_missing:
+            normalized_monthly = pd.DataFrame()
+            try:
+                raw_monthly = await run_blocking(
+                    self._fetch_monthly,
+                    symbol,
+                    fetch_start.replace("-", ""),
+                    fetch_end.replace("-", ""),
+                    timeout=30.0,
+                    retries=1,
+                )
+                if raw_monthly is not None:
+                    normalized_monthly = normalize_akshare_frame(raw_monthly)
+            except Exception:
+                normalized_monthly = pd.DataFrame()
+            if normalized_monthly.empty:
+                try:
+                    raw_daily = await run_blocking(
+                        self._fetch_daily_sina,
+                        symbol,
+                        fetch_start.replace("-", ""),
+                        fetch_end.replace("-", ""),
+                        timeout=40.0,
+                        retries=1,
+                    )
+                    if raw_daily is not None and not raw_daily.empty:
+                        normalized_monthly = resample_ohlcv(
+                            normalize_akshare_frame(raw_daily), "ME"
+                        )
+                except Exception:
+                    normalized_monthly = pd.DataFrame()
+            if normalized_monthly.empty:
+                # Last resort: resample the cached 3y daily history.
+                normalized_monthly = resample_ohlcv(frame, "ME")
+            if "pct_change" not in normalized_monthly.columns:
+                normalized_monthly["pct_change"] = (
+                    normalized_monthly["close"].pct_change() * 100.0
+                ).fillna(0.0)
+            if normalized_monthly.empty:
+                continue
+            await run_blocking(
+                monthly_history_store.merge,
+                symbol,
+                "qfq",
+                normalized_monthly,
+                timeout=10.0,
+                retries=0,
+            )
+        monthly_frame = await run_blocking(
+            monthly_history_store.load,
+            symbol,
+            "qfq",
+            monthly_start_str,
+            end_str,
+            timeout=10.0,
+            retries=0,
+        )
+        monthly_history: list[dict[str, Any]] = []
+        if not monthly_frame.empty:
+            monthly_view = monthly_frame.tail(180).copy()
+            monthly_view["date"] = monthly_view["date"].dt.strftime("%Y-%m-%d")
+            monthly_history = monthly_view.to_dict(orient="records")
 
         payload = {
             "symbol": symbol,
@@ -186,6 +274,7 @@ class StockDataHandler:
                 "monthly": _macd_summary(monthly["close"]) if not monthly.empty else _macd_summary(daily["close"]),
             },
             "daily_features": features.to_dict(orient="records"),
+            "monthly_history": monthly_history,
             "history_cache": history_meta or {},
         }
 
@@ -214,6 +303,37 @@ class StockDataHandler:
                     end_date=end_date,
                     adjust="qfq",
                 )
+
+    @staticmethod
+    def _fetch_monthly(symbol: str, start_date: str, end_date: str):
+        import akshare as ak
+
+        with disable_http_proxy():
+            return ak.stock_zh_a_hist(
+                symbol=symbol,
+                period="monthly",
+                start_date=start_date,
+                end_date=end_date,
+                adjust="qfq",
+            )
+
+    @staticmethod
+    def _fetch_daily_sina(symbol: str, start_date: str, end_date: str):
+        import akshare as ak
+
+        with disable_http_proxy():
+            return ak.stock_zh_a_daily(
+                symbol=StockDataHandler._sina_symbol(symbol),
+                start_date=start_date,
+                end_date=end_date,
+                adjust="qfq",
+            )
+
+    @staticmethod
+    def _sina_symbol(symbol: str) -> str:
+        if symbol.startswith(("6", "9")):
+            return f"sh{symbol}"
+        return f"sz{symbol}"
 
     @staticmethod
     def _tx_symbol(symbol: str) -> str:

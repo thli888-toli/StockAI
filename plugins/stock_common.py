@@ -160,6 +160,10 @@ def prepare_daily_features(frame: pd.DataFrame) -> pd.DataFrame:
         return df
 
     close = df["close"]
+    high = df["high"]
+    low = df["low"]
+    volume = df["volume"]
+    amount = df["amount"]
     macd = compute_macd(close)
     df["macd"] = macd["macd"]
     df["macd_signal"] = macd["signal"]
@@ -178,6 +182,19 @@ def prepare_daily_features(frame: pd.DataFrame) -> pd.DataFrame:
     df["close_ma66_ratio"] = close / df["ma66"]
     df["close_ma154_ratio"] = close / df["ma154"]
     df["close_ma250_ratio"] = close / df["ma250"]
+
+    true_range = pd.concat(
+        [high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()],
+        axis=1,
+    ).max(axis=1)
+    df["atr14"] = true_range.rolling(14).mean()
+    boll_mid = close.rolling(20).mean()
+    boll_std = close.rolling(20).std()
+    df["bollinger_bandwidth"] = (4.0 * boll_std) / boll_mid.replace(0.0, pd.NA)
+    df["bollinger_pctb"] = (close - (boll_mid - 2.0 * boll_std)) / (4.0 * boll_std)
+    df["close_high20_ratio"] = close / high.rolling(20).max()
+    df["close_low20_ratio"] = close / low.rolling(20).min()
+    df["amount_ratio"] = amount / amount.rolling(20).mean()
 
     numeric_columns = [
         "open",
@@ -205,10 +222,23 @@ def prepare_daily_features(frame: pd.DataFrame) -> pd.DataFrame:
         "close_ma66_ratio",
         "close_ma154_ratio",
         "close_ma250_ratio",
+        "atr14",
+        "bollinger_bandwidth",
+        "bollinger_pctb",
+        "close_high20_ratio",
+        "close_low20_ratio",
+        "amount_ratio",
     ]
     df[numeric_columns] = df[numeric_columns].replace([np.inf, -np.inf], np.nan)
     df = df.dropna(subset=["macd", "macd_signal", "macd_histogram", "rsi14", "ma20"])
-    df[numeric_columns] = df[numeric_columns].fillna(0.0)
+    warmup_columns = [
+        column
+        for column in numeric_columns
+        if column not in ("ma154", "ma250", "close_ma154_ratio", "close_ma250_ratio")
+    ]
+    # Long-window MA columns stay NaN when the series is too short; models drop
+    # them instead of learning from a constant 0.
+    df[warmup_columns] = df[warmup_columns].fillna(0.0)
     return df
 
 
@@ -299,6 +329,10 @@ async def run_blocking(
                 asyncio.to_thread(func, *args, **kwargs),
                 timeout=timeout,
             )
+        except asyncio.TimeoutError:
+            last_error = TimeoutError(f"阻塞调用超过 {timeout:g} 秒未完成")
+            if attempt < retries:
+                await asyncio.sleep(0.4 * (2**attempt))
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             if attempt < retries:

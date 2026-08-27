@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -39,7 +40,7 @@ def _raw_history(rows: int = 180) -> pd.DataFrame:
 
 
 class _FakeHistoryStore:
-    def __init__(self, frame: pd.DataFrame):
+    def __init__(self, frame: pd.DataFrame, **kwargs):
         self.frame = frame
 
     def missing_ranges(self, symbol, adjust, start_date, end_date):
@@ -65,12 +66,21 @@ class _FakeHistoryStore:
 @pytest.mark.asyncio
 async def test_stock_data_handler_complete_run(monkeypatch):
     fake_store = _FakeHistoryStore(normalize_akshare_frame(_raw_history()))
-    monkeypatch.setattr(stock_data_service, "StockHistoryStore", lambda path: fake_store)
+    monkeypatch.setattr(
+        stock_data_service,
+        "StockHistoryStore",
+        lambda path, **kwargs: fake_store,
+    )
 
     handler = StockDataHandler()
     monkeypatch.setattr(
         handler,
         "_fetch_daily",
+        lambda symbol, start_date, end_date: _raw_history(),
+    )
+    monkeypatch.setattr(
+        handler,
+        "_fetch_monthly",
         lambda symbol, start_date, end_date: _raw_history(),
     )
 
@@ -86,7 +96,41 @@ async def test_stock_data_handler_complete_run(monkeypatch):
     assert payload["company_name"] == "贵州茅台"
     assert payload["macd"]["daily"]["trend"] == "bullish"
     assert payload["daily_features"]
+    assert payload["monthly_history"]
     assert payload["history_cache"]["row_count"] == 180
+
+
+@pytest.mark.asyncio
+async def test_stock_data_handler_monthly_sina_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr(stock_data_service, "STOCK_CACHE_DB", str(tmp_path / "cache.db"))
+    handler = StockDataHandler()
+    monkeypatch.setattr(
+        handler,
+        "_fetch_daily",
+        lambda symbol, start_date, end_date: _raw_history(),
+    )
+    monkeypatch.setattr(
+        handler,
+        "_fetch_daily_sina",
+        lambda symbol, start_date, end_date: _raw_history(),
+    )
+
+    def boom_monthly(symbol, start_date, end_date):
+        raise RuntimeError("eastmoney monthly down")
+
+    monkeypatch.setattr(handler, "_fetch_monthly", boom_monthly)
+
+    async def fake_company_info(symbol):
+        return {"company_name": "中际旭创", "industry": "通信"}
+
+    monkeypatch.setattr(handler, "_fetch_company_info_optional", fake_company_info)
+
+    result = await handler.run(TaskRequest(query="600988"))
+    payload = json.loads(result)
+    monthly = payload["monthly_history"]
+    assert monthly
+    assert len(monthly) < len(payload["daily_features"])
+    assert monthly[0]["date"].endswith(("-31", "-30", "-28", "-29"))
 
 
 @pytest.mark.asyncio
@@ -152,7 +196,7 @@ async def test_stock_quant_handler_complete_run(monkeypatch):
         "warnings": [],
     }
 
-    def fake_build(symbol, records, as_of):
+    def fake_build(symbol, records, as_of, monthly_records=None):
         return json.dumps(expected)
 
     monkeypatch.setattr(stock_quant_service, "_build_quant_payload", fake_build)
@@ -168,6 +212,45 @@ async def test_stock_quant_handler_complete_run(monkeypatch):
         )
     )
     assert json.loads(result) == expected
+
+
+def test_stock_quant_handler_uses_900s_build_timeout(monkeypatch):
+    from plugins.stock_quant import service as stock_quant_service
+
+    assert stock_quant_service.QUANT_BUILD_TIMEOUT_SECONDS == 900.0
+    captured: dict = {}
+
+    async def fake_run_blocking(func, *args, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return json.dumps({"ok": True})
+
+    monkeypatch.setattr(stock_quant_service, "run_blocking", fake_run_blocking)
+    monkeypatch.setattr(stock_quant_service.QUANT_CACHE, "get", lambda key: None)
+    monkeypatch.setattr(
+        stock_quant_service.PERSISTENT_CACHE,
+        "get",
+        lambda symbol, feature_hash: None,
+    )
+    monkeypatch.setattr(stock_quant_service.QUANT_CACHE, "set", lambda key, value: None)
+    monkeypatch.setattr(
+        stock_quant_service.PERSISTENT_CACHE,
+        "put",
+        lambda symbol, feature_hash, payload: None,
+    )
+    result = asyncio.run(
+        StockQuantHandler().run(
+            TaskRequest(
+                query="600519",
+                inputs={
+                    "market_data": json.dumps(
+                        {"symbol": "600519", "as_of": "2026-08-22", "daily_features": []}
+                    )
+                },
+            )
+        )
+    )
+    assert captured["timeout"] == 900.0
+    assert json.loads(result) == {"ok": True}
 
 
 @pytest.mark.asyncio

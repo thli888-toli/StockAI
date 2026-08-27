@@ -53,6 +53,17 @@ class WatchlistStore:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(user_id, symbol)
                 );
+                CREATE TABLE IF NOT EXISTS chart_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    period TEXT NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    payload TEXT NOT NULL,
+                    saved_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_chart_snapshots_user_symbol
+                    ON chart_snapshots(user_id, symbol, saved_at DESC);
                 """
             )
             columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(watchlist)")}
@@ -189,5 +200,97 @@ class WatchlistStore:
             cursor = self.conn.execute(
                 "DELETE FROM watchlist WHERE user_id=? AND symbol=?",
                 (user_id, symbol),
+            )
+            return cursor.rowcount > 0
+
+    def save_chart_snapshot(
+        self,
+        user_id: str,
+        symbol: str,
+        period: str,
+        payload: dict[str, Any],
+        label: str = "",
+    ) -> dict[str, Any]:
+        now = _now()
+        with self.lock, self.conn:
+            cursor = self.conn.execute(
+                """
+                INSERT INTO chart_snapshots(user_id, symbol, period, label, payload, saved_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    symbol,
+                    period,
+                    label or now,
+                    json.dumps(payload, default=str),
+                    now,
+                ),
+            )
+            snapshot_id = int(cursor.lastrowid)
+            # Keep only the most recent 20 snapshots per user + symbol.
+            self.conn.execute(
+                """
+                DELETE FROM chart_snapshots
+                WHERE user_id=? AND symbol=? AND id NOT IN (
+                    SELECT id FROM chart_snapshots
+                    WHERE user_id=? AND symbol=?
+                    ORDER BY saved_at DESC, id DESC
+                    LIMIT 20
+                )
+                """,
+                (user_id, symbol, user_id, symbol),
+            )
+        return {
+            "id": snapshot_id,
+            "user_id": user_id,
+            "symbol": symbol,
+            "period": period,
+            "label": label or now,
+            "saved_at": now,
+        }
+
+    def list_chart_snapshots(
+        self, user_id: str, symbol: str
+    ) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT id, period, label, saved_at
+                FROM chart_snapshots
+                WHERE user_id=? AND symbol=?
+                ORDER BY saved_at DESC, id DESC
+                """,
+                (user_id, symbol),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_chart_snapshot(
+        self, user_id: str, symbol: str, snapshot_id: int
+    ) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.conn.execute(
+                """
+                SELECT * FROM chart_snapshots
+                WHERE user_id=? AND symbol=? AND id=?
+                """,
+                (user_id, symbol, snapshot_id),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["payload"] = json.loads(item.get("payload") or "{}")
+        return item
+
+    def delete_chart_snapshot(
+        self, user_id: str, symbol: str, snapshot_id: int
+    ) -> bool:
+        with self.lock, self.conn:
+            cursor = self.conn.execute(
+                """
+                DELETE FROM chart_snapshots
+                WHERE user_id=? AND symbol=? AND id=?
+                """,
+                (user_id, symbol, snapshot_id),
             )
             return cursor.rowcount > 0

@@ -150,6 +150,10 @@ body {
   overflow: hidden;
 }
 
+.modal.modal-compare {
+  width: min(1600px, 100%);
+}
+
 .modal-header {
   display: flex;
   align-items: center;
@@ -329,4 +333,55 @@ body {
 .chart-page .legend-dot {
   width: 13px;
   height: 13px;
+}
+
+.chart-history-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.chart-history-controls select {
+  padding: 8px;
+  border: 1px solid #c7ccd6;
+  border-radius: 6px;
+}
+
+.save-chart {
+  background: #e9edff;
+  color: #1f2430;
+}
+
+.save-message {
+  color: #1f7a3d;
+  font-weight: 600;
+}
+
+.delete-history {
+  background: #fde3e3;
+  color: #b02a2a;
+}
+
+.chart-compare {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.chart-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.chart-pane h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.chart-pane .chart-page {
+  flex: 1;
+  min-width: 0;
 }

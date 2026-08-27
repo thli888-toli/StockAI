@@ -192,6 +192,7 @@ def _fallback_report(
     horizons = quant.get("horizons", {}) or {}
     backtest = quant.get("backtest", {}) or {}
     weekly_backtest = quant.get("weekly_backtest", {}) or {}
+    monthly_backtest = quant.get("monthly_backtest", {}) or {}
     stats = market_data.get("stats", {}) or {}
     features = market_data.get("daily_features") or []
     last = features[-1] if features else {}
@@ -275,7 +276,8 @@ def _fallback_report(
     lines.append(
         f"- 回测：日线 walk-forward AUC {backtest.get('walk_forward_auc')}"
         f"（样本{backtest.get('sample_count', 0)}）；周线 walk-forward AUC {weekly_backtest.get('walk_forward_auc')}"
-        f"（样本{weekly_backtest.get('sample_count', 0)}）。"
+        f"（样本{weekly_backtest.get('sample_count', 0)}）；月线 walk-forward AUC {monthly_backtest.get('walk_forward_auc')}"
+        f"（样本{monthly_backtest.get('sample_count', 0)}）。"
     )
     lines.append("- 提示：AUC 接近 0.5，量化方向信号存在失效风险，1w 接近随机水平，需折价使用。")
 
@@ -487,7 +489,7 @@ class StockAnalystHandler:
             "- 15d：上行概率 xx.xx%，方向 上行/下行/中性，置信度 x.xxx。\n"
             "- 1w：上行概率 xx.xx%，方向 上行/下行/中性，置信度 x.xxx。\n"
             "- 1mo：上行概率 xx.xx%，方向 上行/下行/中性，置信度 x.xxx。\n"
-            "- 回测：日线 walk-forward AUC x.xxx（样本n）；周线 walk-forward AUC x.xxx（样本n）。\n"
+            "- 回测：日线 walk-forward AUC x.xxx（样本n）；周线 walk-forward AUC x.xxx（样本n）；月线 walk-forward AUC x.xxx（样本n）。\n"
             "- 提示：AUC 接近 0.5，量化方向信号存在失效风险，1w 接近随机水平，需折价使用。\n"
             "其中第五段必须严格使用以下格式：\n"
             "- 综合置信度：高/中/低\n"
