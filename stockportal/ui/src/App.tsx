@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, getToken, setToken } from "./api";
+import KLineChartView, { type ChartPayload, type Period } from "./KLineChartView";
 import StockChart from "./StockChart";
 import type { WatchlistItem } from "./types";
 
@@ -19,6 +20,86 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [loginNickname, setLoginNickname] = useState("");
   const pollRef = useRef<number | null>(null);
+  const [chartSnapshots, setChartSnapshots] = useState<
+    { id: number; period: string; label: string; saved_at: string }[]
+  >([]);
+  const [historyPayload, setHistoryPayload] = useState<ChartPayload | null>(null);
+  const [historyError, setHistoryError] = useState("");
+  const [selectedSnapshotId, setSelectedSnapshotId] = useState<string>("");
+  const [chartPeriod, setChartPeriod] = useState<Period>("daily");
+  const [chartSaving, setChartSaving] = useState(false);
+  const [chartSaveMessage, setChartSaveMessage] = useState("");
+
+  useEffect(() => {
+    if (!modal || modal.kind !== "chart") return;
+    let cancelled = false;
+    setChartSnapshots([]);
+    setHistoryPayload(null);
+    setHistoryError("");
+    setSelectedSnapshotId("");
+    api
+      .listChartSnapshots(modal.item.symbol)
+      .then((list) => {
+        if (!cancelled) setChartSnapshots(list);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setHistoryError(err instanceof Error ? err.message : String(err));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [modal]);
+
+  const loadHistory = async (value: string) => {
+    setSelectedSnapshotId(value);
+    setHistoryError("");
+    if (!value) {
+      setHistoryPayload(null);
+      return;
+    }
+    const snapshotId = Number(value);
+    try {
+      const snapshot = await api.getChartSnapshot(modal!.item.symbol, snapshotId);
+      setHistoryPayload(snapshot.payload as ChartPayload);
+    } catch (err) {
+      setHistoryPayload(null);
+      setHistoryError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const deleteHistory = async () => {
+    if (!selectedSnapshotId) return;
+    const snapshotId = Number(selectedSnapshotId);
+    setHistoryError("");
+    try {
+      await api.deleteChartSnapshot(modal!.item.symbol, snapshotId);
+      setChartSnapshots((prev) => prev.filter((item) => item.id !== snapshotId));
+      if (historyPayload && snapshotId === Number(selectedSnapshotId)) {
+        setHistoryPayload(null);
+      }
+      setSelectedSnapshotId("");
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const saveCurrentChart = async () => {
+    if (!modal || modal.kind !== "chart") return;
+    setChartSaveMessage("");
+    setChartSaving(true);
+    try {
+      await api.saveChart(modal.item.symbol, chartPeriod);
+      setChartSaveMessage("已保存");
+      const list = await api.listChartSnapshots(modal.item.symbol);
+      setChartSnapshots(list);
+    } catch (err) {
+      setHistoryError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChartSaving(false);
+    }
+  };
 
   const stopPolling = () => {
     if (pollRef.current !== null) {
@@ -264,14 +345,17 @@ export default function App() {
 
       {modal && (
         <div className="modal-overlay" onClick={() => setModal(null)}>
-          <div className="modal" onClick={(event) => event.stopPropagation()}>
+          <div
+            className={`modal ${historyPayload ? "modal-compare" : ""}`}
+            onClick={(event) => event.stopPropagation()}
+          >
             <div className="modal-header">
               <h2>
                 {modal.kind === "report"
                   ? `${modal.item.symbol} 分析结果`
                   : modal.kind === "error"
                     ? `${modal.item.symbol} 错误`
-                    : `${modal.item.symbol} K 线图`}
+                    : `${modal.item.symbol}${modal.item.company_name ? ` ${modal.item.company_name}` : ""} K 线图`}
               </h2>
               <button className="modal-close" onClick={() => setModal(null)}>
                 ×
@@ -285,7 +369,83 @@ export default function App() {
                   <p>暂无报告。</p>
                 )
               ) : modal.kind === "chart" ? (
-                <StockChart symbol={modal.item.symbol} />
+                <>
+                  <div className="chart-history-controls">
+                    {historyPayload && (
+                      <>
+                        {(["daily", "weekly", "monthly"] as Period[]).map((item) => (
+                          <button
+                            key={item}
+                            className={chartPeriod === item ? "active" : ""}
+                            onClick={() => setChartPeriod(item)}
+                          >
+                            {item === "daily" ? "日K" : item === "weekly" ? "周K" : "月K"}
+                          </button>
+                        ))}
+                        <button
+                          className="save-chart"
+                          onClick={saveCurrentChart}
+                          disabled={chartSaving}
+                        >
+                          {chartSaving ? "保存中..." : "保存此图表"}
+                        </button>
+                        {chartSaveMessage && (
+                          <span className="save-message">{chartSaveMessage}</span>
+                        )}
+                      </>
+                    )}
+                    <label htmlFor="history-chart-select">历史图表</label>
+                    <select
+                      id="history-chart-select"
+                      value={selectedSnapshotId}
+                      onChange={(event) => loadHistory(event.target.value)}
+                    >
+                      <option value="">选择历史快照</option>
+                      {chartSnapshots.map((snapshot) => (
+                        <option key={snapshot.id} value={snapshot.id}>
+                          {snapshot.label}（
+                          {snapshot.period === "daily"
+                            ? "日K"
+                            : snapshot.period === "weekly"
+                              ? "周K"
+                              : "月K"}
+                          ）
+                        </option>
+                      ))}
+                    </select>
+                    {selectedSnapshotId && (
+                      <button className="delete-history" onClick={deleteHistory}>
+                        删除历史快照
+                      </button>
+                    )}
+                  </div>
+                  {historyError && <p className="error">{historyError}</p>}
+                  <div className={historyPayload ? "chart-compare" : ""}>
+                    <div className={historyPayload ? "chart-pane" : ""}>
+                      {historyPayload ? (
+                        <>
+                          <h3>当前 K线图</h3>
+                          <StockChart
+                            symbol={modal.item.symbol}
+                            period={chartPeriod}
+                            onPeriodChange={setChartPeriod}
+                            hideHeader
+                          />
+                        </>
+                      ) : (
+                        <StockChart symbol={modal.item.symbol} />
+                      )}
+                    </div>
+                    {historyPayload && (
+                      <div className="chart-pane">
+                        <h3>历史 K线图</h3>
+                        <div className="chart-page">
+                          <KLineChartView payload={historyPayload} />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </>
               ) : (
                 <pre className="error-text">{modal.item.error || "未知错误"}</pre>
               )}

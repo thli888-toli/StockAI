@@ -35,6 +35,11 @@ class LoginPayload(BaseModel):
     nickname: str | None = None
 
 
+class ChartSavePayload(BaseModel):
+    period: str
+    label: str | None = None
+
+
 def _validate_symbol(symbol: str) -> str:
     symbol = symbol.strip()
     if not re.fullmatch(r"\d{6}", symbol):
@@ -426,6 +431,22 @@ def create_stock_portal_app(
             raise HTTPException(status_code=401, detail="未登录")
         return user
 
+    def _chart_payload_for_item(
+        symbol: str, item: dict[str, Any], period: str
+    ) -> dict[str, Any] | None:
+        market_data = _market_data_from_outputs(item.get("outputs") or {})
+        quant = _quant_from_outputs(item.get("outputs") or {})
+        payload = _build_chart_payload(symbol, market_data, period, quant)
+        if payload is None:
+            return None
+        payload["llm_summary"] = _summary_from_report(
+            (item.get("outputs") or {}).get("report")
+        )
+        payload["fundamental"] = _fundamental_from_outputs(
+            item.get("outputs") or {}
+        )
+        return payload
+
     app = FastAPI(title="StockAI Portal", version="1.0.0")
 
     @app.get("/health")
@@ -552,14 +573,66 @@ def create_stock_portal_app(
         item = store.get(user["user_id"], symbol)
         if item is None:
             raise HTTPException(status_code=404, detail="watchlist symbol not found")
-        market_data = _market_data_from_outputs(item.get("outputs") or {})
-        quant = _quant_from_outputs(item.get("outputs") or {})
-        payload = _build_chart_payload(symbol, market_data, period, quant)
+        payload = _chart_payload_for_item(symbol, item, period)
         if payload is None:
             raise HTTPException(status_code=404, detail="market data not available yet")
-        payload["llm_summary"] = _summary_from_report((item.get("outputs") or {}).get("report"))
-        payload["fundamental"] = _fundamental_from_outputs(item.get("outputs") or {})
         return payload
+
+    @app.post("/api/watchlist/{symbol}/chart/save")
+    def save_chart(
+        symbol: str,
+        payload: ChartSavePayload,
+        user: dict[str, Any] = Depends(get_current_user),
+    ):
+        symbol = _validate_symbol(symbol)
+        if payload.period not in ("daily", "weekly", "monthly"):
+            raise HTTPException(
+                status_code=422, detail="period must be daily, weekly, or monthly"
+            )
+        item = store.get(user["user_id"], symbol)
+        if item is None:
+            raise HTTPException(status_code=404, detail="watchlist symbol not found")
+        chart_payload = _chart_payload_for_item(symbol, item, payload.period)
+        if chart_payload is None:
+            raise HTTPException(status_code=404, detail="market data not available yet")
+        return store.save_chart_snapshot(
+            user["user_id"],
+            symbol,
+            payload.period,
+            chart_payload,
+            payload.label or "",
+        )
+
+    @app.get("/api/watchlist/{symbol}/charts")
+    def list_charts(
+        symbol: str,
+        user: dict[str, Any] = Depends(get_current_user),
+    ):
+        symbol = _validate_symbol(symbol)
+        return store.list_chart_snapshots(user["user_id"], symbol)
+
+    @app.get("/api/watchlist/{symbol}/charts/{snapshot_id}")
+    def get_chart_snapshot(
+        symbol: str,
+        snapshot_id: int,
+        user: dict[str, Any] = Depends(get_current_user),
+    ):
+        symbol = _validate_symbol(symbol)
+        snapshot = store.get_chart_snapshot(user["user_id"], symbol, snapshot_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="chart snapshot not found")
+        return snapshot
+
+    @app.delete("/api/watchlist/{symbol}/charts/{snapshot_id}")
+    def delete_chart_snapshot(
+        symbol: str,
+        snapshot_id: int,
+        user: dict[str, Any] = Depends(get_current_user),
+    ):
+        symbol = _validate_symbol(symbol)
+        if not store.delete_chart_snapshot(user["user_id"], symbol, snapshot_id):
+            raise HTTPException(status_code=404, detail="chart snapshot not found")
+        return {"deleted": True}
 
     dist_dir = Path(__file__).resolve().parent / "ui" / "dist"
     if dist_dir.exists():

@@ -31,8 +31,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     refresh_parser.add_argument("--orchestrator", default=None)
     refresh_parser.add_argument("--db", default=None)
-    refresh_parser.add_argument("--timeout", type=float, default=600.0)
-    refresh_parser.add_argument("--poll-interval", type=float, default=1.0)
 
     sub.add_parser("portal", help="Run the portal backend and serve the built UI")
 
@@ -63,8 +61,6 @@ def main() -> int:
             args.all,
             args.orchestrator or ORCHESTRATOR_URL,
             args.db or STOCK_PORTAL_DB,
-            args.timeout,
-            args.poll_interval,
         )
     elif args.command == "portal":
         run_portal_backend()

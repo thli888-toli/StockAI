@@ -44,6 +44,12 @@ FEATURE_COLUMNS = [
     "close_ma154_ratio",
     "close_ma250_ratio",
     "turnover",
+    "atr14",
+    "bollinger_bandwidth",
+    "bollinger_pctb",
+    "close_high20_ratio",
+    "close_low20_ratio",
+    "amount_ratio",
 ]
 
 LIGHTGBM_PARAMS = {
@@ -67,6 +73,11 @@ WEEKLY_VALIDATION = 30
 WEEKLY_EPOCHS = 8
 
 MONTHLY_MIN_BARS = 20
+MONTHLY_MIN_TRAIN = 60
+MONTHLY_VALIDATION = 30
+MONTHLY_SEQ_LEN = 10
+MONTHLY_EPOCHS = 8
+QUANT_BUILD_TIMEOUT_SECONDS = 900.0
 
 
 def _neutral_horizon() -> dict[str, Any]:
@@ -82,12 +93,23 @@ def _prepare_dataset(records: list[dict[str, Any]]) -> pd.DataFrame:
     if df.empty:
         return df
     df = df.copy()
-    for column in FEATURE_COLUMNS + ["close"]:
-        if column not in df.columns:
-            df[column] = 0.0
+    if "close" not in df.columns:
+        df["close"] = 0.0
     numeric_columns = FEATURE_COLUMNS + ["close"]
-    df[numeric_columns] = df[numeric_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    existing = [column for column in numeric_columns if column in df.columns]
+    df[existing] = df[existing].apply(pd.to_numeric, errors="coerce")
     return df.reset_index(drop=True)
+
+
+def _usable_feature_columns(df: pd.DataFrame) -> list[str]:
+    """Return feature columns with enough valid values (>=50%) to train on."""
+    result: list[str] = []
+    for column in FEATURE_COLUMNS:
+        if column not in df.columns:
+            continue
+        if df[column].notna().mean() >= 0.5:
+            result.append(column)
+    return result
 
 
 def _add_shift_target(df: pd.DataFrame, target_column: str, shift: int = 1) -> pd.DataFrame:
@@ -106,9 +128,8 @@ def _records_to_ohlcv(records: list[dict[str, Any]]) -> pd.DataFrame:
     if df.empty or not {"date", "open", "high", "low", "close", "volume"}.issubset(df.columns):
         return pd.DataFrame()
     columns = ["date", "open", "high", "low", "close", "volume"]
-    for column in ("amount", "turnover"):
-        columns.append(column)
-    df = df[columns].copy()
+    existing = [column for column in columns if column in df.columns]
+    df = df[existing].copy()
     for column in ("amount", "turnover"):
         if column not in df.columns:
             df[column] = 0.0
@@ -148,8 +169,11 @@ def _lstm_probability(
     usable = df.dropna(subset=[target_column])
     if len(usable) < min_train:
         return 0.5
-    features_all = df[FEATURE_COLUMNS].to_numpy(dtype=np.float64)
-    usable_features = usable[FEATURE_COLUMNS].to_numpy(dtype=np.float64)
+    features = _usable_feature_columns(df)
+    if not features:
+        return 0.5
+    features_all = df[features].fillna(0.0).to_numpy(dtype=np.float64)
+    usable_features = usable[features].fillna(0.0).to_numpy(dtype=np.float64)
     usable_labels = usable[target_column].to_numpy(dtype=np.float64)
     standardized, mean, std = lstm_model.standardize(features_all)
     usable_standardized = (usable_features - mean) / std
@@ -172,9 +196,12 @@ def _lightgbm_probability(
     usable = df.dropna(subset=[target_column])
     if len(usable) < min_train:
         return 0.5
+    features = _usable_feature_columns(df)
+    if not features:
+        return 0.5
     model = _new_model()
-    model.fit(usable[FEATURE_COLUMNS], usable[target_column])
-    latest = df.iloc[[-1]][FEATURE_COLUMNS].fillna(0.0)
+    model.fit(usable[features], usable[target_column])
+    latest = df.iloc[[-1]][features].fillna(0.0)
     return float(model.predict_proba(latest)[0, 1])
 
 
@@ -224,7 +251,8 @@ def _lstm_sequences(
     seq_len: int,
     target_column: str,
 ):
-    features = usable.iloc[start:end][FEATURE_COLUMNS].to_numpy(dtype=np.float64)
+    feature_columns = _usable_feature_columns(usable)
+    features = usable.iloc[start:end][feature_columns].fillna(0.0).to_numpy(dtype=np.float64)
     labels = usable.iloc[start:end][target_column].to_numpy(dtype=np.float64)
     standardized, _, _ = lstm_model.standardize(features)
     return lstm_model.build_sequences(standardized, labels, seq_len)
@@ -241,6 +269,9 @@ def _lightgbm_walk_forward(
     usable = df.dropna(subset=[target_column])
     if len(usable) < min_train:
         return 0.0, len(usable), [], []
+    features = _usable_feature_columns(df)
+    if not features:
+        return 0.0, len(usable), [], []
 
     y_true_all: list[float] = []
     y_pred_all: list[float] = []
@@ -255,9 +286,9 @@ def _lightgbm_walk_forward(
             end = val_end
             continue
         model = _new_model()
-        model.fit(train[FEATURE_COLUMNS], train[target_column])
+        model.fit(train[features], train[target_column])
         y_true_all.extend(val[target_column].tolist())
-        y_pred_all.extend(model.predict_proba(val[FEATURE_COLUMNS])[:, 1].tolist())
+        y_pred_all.extend(model.predict_proba(val[features])[:, 1].tolist())
         end = val_end
 
     if not y_true_all or len(set(y_true_all)) < 2:
@@ -360,7 +391,12 @@ def _monthly_signal(frame: pd.DataFrame) -> tuple[dict[str, Any], int]:
     return _neutral_horizon(), len(frame)
 
 
-def _build_quant_payload(symbol: str, records: list[dict[str, Any]], as_of: str) -> str:
+def _build_quant_payload(
+    symbol: str,
+    records: list[dict[str, Any]],
+    as_of: str,
+    monthly_records: list[dict[str, Any]] | None = None,
+) -> str:
     df = _prepare_dataset(records)
     if len(df) < 120:
         payload = {
@@ -439,11 +475,64 @@ def _build_quant_payload(symbol: str, records: list[dict[str, Any]], as_of: str)
         weekly_backtest = {"walk_forward_auc": None, "sample_count": int(len(weekly))}
         warnings.append("insufficient weekly history for LSTM+LightGBM training")
 
-    monthly = _period_ohlcv(records, "ME")
-    monthly_signal, monthly_samples = _monthly_signal(monthly)
-    horizons["1mo"] = monthly_signal
-    if monthly_samples < MONTHLY_MIN_BARS:
-        warnings.append("insufficient monthly history for technical trend")
+    if monthly_records:
+        monthly = _records_to_ohlcv(monthly_records)
+    else:
+        monthly = _period_ohlcv(records, "ME")
+    monthly_features = prepare_daily_features(monthly)
+    if not monthly_features.empty:
+        monthly_features = _add_shift_target(monthly_features, "target_1mo", 1)
+    monthly_usable = (
+        len(monthly_features.dropna(subset=["target_1mo"]))
+        if "target_1mo" in monthly_features.columns
+        else 0
+    )
+    if monthly_usable >= MONTHLY_MIN_TRAIN:
+        lgb_probability = _lightgbm_probability(
+            monthly_features, "target_1mo", MONTHLY_MIN_TRAIN
+        )
+        lstm_probability = _lstm_probability(
+            monthly_features,
+            "target_1mo",
+            MONTHLY_MIN_TRAIN,
+            MONTHLY_SEQ_LEN,
+            MONTHLY_EPOCHS,
+        )
+        lgb_auc, _, lgb_y_true, lgb_y_pred = _lightgbm_walk_forward(
+            monthly_features, "target_1mo", MONTHLY_MIN_TRAIN, MONTHLY_VALIDATION
+        )
+        lstm_auc, monthly_samples, lstm_y_true, lstm_y_pred = _lstm_walk_forward(
+            monthly_features,
+            "target_1mo",
+            MONTHLY_MIN_TRAIN,
+            MONTHLY_VALIDATION,
+            MONTHLY_SEQ_LEN,
+            MONTHLY_EPOCHS,
+        )
+        lgb_calibration = _fit_calibration(lgb_y_true, lgb_y_pred)
+        lstm_calibration = _fit_calibration(lstm_y_true, lstm_y_pred)
+        horizons["1mo"] = _ensemble_signal(
+            lgb_probability,
+            lstm_probability,
+            lgb_auc,
+            lstm_auc,
+            lgb_calibration,
+            lstm_calibration,
+        )
+        monthly_backtest = {
+            "walk_forward_auc": round((lgb_auc + lstm_auc) / 2, 6),
+            "sample_count": int(len(monthly_features)),
+        }
+    else:
+        monthly_signal, monthly_samples = _monthly_signal(monthly)
+        horizons["1mo"] = monthly_signal
+        monthly_backtest = {
+            "walk_forward_auc": None,
+            "sample_count": int(len(monthly)),
+        }
+        if monthly_samples < MONTHLY_MIN_BARS:
+            warnings.append("insufficient monthly history for technical trend")
+        warnings.append("insufficient monthly history for LSTM+LightGBM training")
 
     payload = {
         "symbol": symbol,
@@ -452,6 +541,7 @@ def _build_quant_payload(symbol: str, records: list[dict[str, Any]], as_of: str)
         "horizons": horizons,
         "backtest": {"walk_forward_auc": daily_auc, "sample_count": int(len(df))},
         "weekly_backtest": weekly_backtest,
+        "monthly_backtest": monthly_backtest,
         "warnings": warnings,
     }
     return json_dumps(payload)
@@ -462,9 +552,13 @@ class StockQuantHandler:
         symbol = validate_symbol(request.query)
         market_data = json_loads(request.inputs.get("market_data", ""), {})
         records = market_data.get("daily_features") or []
+        monthly_records = market_data.get("monthly_history") or []
         as_of = str(market_data.get("as_of") or "")
         records_dump = json.dumps(records, sort_keys=True, default=str)
-        feature_hash = hashlib.sha1(records_dump.encode("utf-8")).hexdigest()
+        monthly_dump = json.dumps(monthly_records, sort_keys=True, default=str)
+        feature_hash = hashlib.sha1(
+            f"{records_dump}|{monthly_dump}".encode("utf-8")
+        ).hexdigest()
         cache_key = f"stock_quant:{symbol}:{as_of}:{feature_hash}"
 
         cached = QUANT_CACHE.get(cache_key)
@@ -475,7 +569,15 @@ class StockQuantHandler:
             QUANT_CACHE.set(cache_key, cached)
             return cached
 
-        result = await run_blocking(_build_quant_payload, symbol, records, as_of, timeout=150.0, retries=0)
+        result = await run_blocking(
+            _build_quant_payload,
+            symbol,
+            records,
+            as_of,
+            monthly_records,
+            timeout=QUANT_BUILD_TIMEOUT_SECONDS,
+            retries=0,
+        )
         QUANT_CACHE.set(cache_key, result)
         PERSISTENT_CACHE.put(symbol, feature_hash, result)
         return result

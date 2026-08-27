@@ -86,70 +86,82 @@ def _fake_orchestrator(monkeypatch, outputs_by_symbol: dict[str, dict] | None = 
     return runs, calls
 
 
-def test_refresh_updates_all_watchlist_rows_across_users(monkeypatch, tmp_path):
-    db_path = tmp_path / "portal.db"
-    store = _seed_store(db_path)
-    _fake_orchestrator(monkeypatch)
-
-    results = refresh_symbol_reports(["600519", "300024"], db_path=db_path, poll_interval=0.01)
-
-    by_symbol = {item["symbol"]: item for item in results}
-    assert by_symbol["600519"]["status"] == "completed"
-    assert by_symbol["600519"]["updated_rows"] == 2
-    assert by_symbol["300024"]["updated_rows"] == 1
-    assert by_symbol["600519"]["report_length"] == len("# 报告 600519")
-    assert by_symbol["600519"]["fundamental_summary"]["valuation_verdict"] == "合理"
-    assert set(by_symbol["600519"]["outputs"]) == {
-        "market_data",
-        "news",
-        "quant",
-        "fundamental",
-        "report",
-    }
-
-    for user_id in ("user-a", "user-b"):
-        item = store.get(user_id, "600519")
-        assert item["status"] == "completed"
-        assert item["run_id"] not in ("old-a", "old-b")
-        assert "公司600519" == json.loads(item["outputs"]["market_data"])["company_name"]
-
-
-def test_refresh_bypasses_same_day_dedupe(monkeypatch, tmp_path):
-    db_path = tmp_path / "portal.db"
-    store = _seed_store(db_path)
-    _fake_orchestrator(monkeypatch)
-
-    refresh_symbol_reports(["600519"], db_path=db_path, poll_interval=0.01)
-
-    item = store.get("user-a", "600519")
-    assert item["outputs"]["report"] == "# 报告 600519"
-    assert item["updated_at"]  # updated_at is refreshed by upsert
-
-
-def test_refresh_stores_failed_run(monkeypatch, tmp_path):
-    db_path = tmp_path / "portal.db"
-    store = _seed_store(db_path)
+def _fake_submit_orchestrator(monkeypatch):
+    posts: list[str] = []
 
     def post_json(url, payload, timeout):
-        return {"run_id": "run-fail", "query": payload["query"], "status": "queued"}
+        posts.append(payload["query"])
+        return {
+            "run_id": f"run-{payload['query']}",
+            "query": payload["query"],
+            "status": "queued",
+        }
 
     def get_json(url, timeout):
-        return {
-            "run_id": "run-fail",
-            "status": "failed",
-            "error": "quant model failed",
-            "outputs": {},
-        }
+        raise AssertionError("refresh_symbol_reports should not poll runs")
 
     monkeypatch.setattr(refresh_reports, "_post_json", post_json)
     monkeypatch.setattr(refresh_reports, "_get_json", get_json)
+    return posts
 
-    results = refresh_symbol_reports(["600519"], db_path=db_path, poll_interval=0.01)
+
+def test_refresh_submits_runs_without_polling(monkeypatch, tmp_path):
+    db_path = tmp_path / "portal.db"
+    store = _seed_store(db_path)
+    posts = _fake_submit_orchestrator(monkeypatch)
+
+    results = refresh_symbol_reports(
+        ["600519", "300024"], orchestrator_url="http://orch", db_path=db_path
+    )
+    by_symbol = {item["symbol"]: item for item in results}
+    assert by_symbol["600519"]["status"] == "submitted"
+    assert by_symbol["600519"]["run_id"] == "run-600519"
+    assert by_symbol["300024"]["status"] == "submitted"
+    assert posts == ["600519", "300024"]
+
+    # Submission points watchlist rows at the new run, but does not poll for outputs.
+    for user_id in ("user-a", "user-b"):
+        item = store.get(user_id, "600519")
+        assert item["run_id"] == "run-600519"
+        assert item["status"] == "queued"
+        assert item["outputs"] == {}
+
+
+def test_refresh_submits_again_regardless_of_existing_state(monkeypatch, tmp_path):
+    db_path = tmp_path / "portal.db"
+    store = _seed_store(db_path)
+    posts = _fake_submit_orchestrator(monkeypatch)
+
+    results = refresh_symbol_reports(
+        ["600519"], orchestrator_url="http://orch", db_path=db_path
+    )
+    assert results[0]["status"] == "submitted"
+    assert posts == ["600519"]
+    assert store.get("user-a", "600519")["run_id"] == "run-600519"
+
+
+def test_refresh_reports_submission_failure(monkeypatch, tmp_path):
+    db_path = tmp_path / "portal.db"
+    _seed_store(db_path)
+
+    def post_json(url, payload, timeout):
+        if payload["query"] == "600519":
+            return {}
+        return {
+            "run_id": "run-300024",
+            "query": payload["query"],
+            "status": "queued",
+        }
+
+    monkeypatch.setattr(refresh_reports, "_post_json", post_json)
+
+    results = refresh_symbol_reports(
+        ["600519", "300024"], orchestrator_url="http://orch", db_path=db_path
+    )
     assert results[0]["status"] == "failed"
-    assert results[0]["updated_rows"] == 2
-    item = store.get("user-a", "600519")
-    assert item["status"] == "failed"
-    assert item["error"] == "quant model failed"
+    assert "run_id" in results[0]["error"]
+    assert results[1]["status"] == "submitted"
+    assert results[1]["run_id"] == "run-300024"
 
 
 def test_refresh_invalid_symbol(monkeypatch, tmp_path):
@@ -157,22 +169,33 @@ def test_refresh_invalid_symbol(monkeypatch, tmp_path):
     calls: list[str] = []
 
     def post_json(url, payload, timeout):
-        calls.append(url)
-        return {}
+        calls.append(payload["query"])
+        return {
+            "run_id": f"run-{payload['query']}",
+            "query": payload["query"],
+            "status": "queued",
+        }
 
     monkeypatch.setattr(refresh_reports, "_post_json", post_json)
-    results = refresh_symbol_reports(["ABC", "600519"], db_path=db_path, poll_interval=0.01)
+    results = refresh_symbol_reports(
+        ["ABC", "600519"], orchestrator_url="http://orch", db_path=db_path
+    )
     assert results[0]["status"] == "failed"
     assert "6-digit" in results[0]["error"]
-    assert len(calls) == 1
+    assert results[1]["status"] == "submitted"
+    assert calls == ["600519"]
 
 
-def test_refresh_without_watchlist_rows_still_runs(monkeypatch, tmp_path):
+def test_refresh_submits_without_watchlist_rows(monkeypatch, tmp_path):
     db_path = tmp_path / "portal.db"
-    _fake_orchestrator(monkeypatch)
-    results = refresh_symbol_reports(["688999"], db_path=db_path, poll_interval=0.01)
-    assert results[0]["status"] == "completed"
+    posts = _fake_submit_orchestrator(monkeypatch)
+    results = refresh_symbol_reports(
+        ["688999"], orchestrator_url="http://orch", db_path=db_path
+    )
+    assert results[0]["status"] == "submitted"
+    assert results[0]["run_id"] == "run-688999"
     assert results[0]["updated_rows"] == 0
+    assert posts == ["688999"]
 
 
 def test_create_runs_submits_all_symbols_upfront(monkeypatch):
@@ -242,43 +265,58 @@ def test_poll_runs_marks_disappeared_run_failed(monkeypatch):
     runs = {"600519": {"run_id": "run-x", "status": "queued"}}
     result = poll_runs(runs, "http://orchestrator", run_timeout=600.0, poll_interval=0.01)
     assert result["600519"]["status"] == "failed"
-    assert "run poll failed" in result["600519"]["error"]
+    assert "run poll failed after 3 attempts" in result["600519"]["error"]
+
+
+def test_poll_runs_survives_transient_poll_failures(monkeypatch):
+    attempts = {"run-x": 0}
+
+    def get_json(url, timeout):
+        attempts["run-x"] += 1
+        if attempts["run-x"] < 3:
+            raise RuntimeError("orchestrator busy")
+        return {"run_id": "run-x", "status": "completed", "outputs": {}}
+
+    monkeypatch.setattr(refresh_reports, "_get_json", get_json)
+    runs = {"600519": {"run_id": "run-x", "status": "queued"}}
+    result = poll_runs(runs, "http://orchestrator", run_timeout=600.0, poll_interval=0.01)
+    assert result["600519"]["status"] == "completed"
 
 
 def test_run_cli_parses_symbols_and_exit_codes(monkeypatch, tmp_path):
     captured: dict = {}
 
-    def fake_refresh(symbols, orchestrator_url, db_path, run_timeout, poll_interval):
+    def fake_refresh(symbols, orchestrator_url=None, db_path=None):
         captured["symbols"] = symbols
         return [
-            {"symbol": "600519", "status": "completed", "run_id": "r1", "report_length": 10},
+            {"symbol": "600519", "status": "submitted", "run_id": "r1"},
             {"symbol": "300024", "status": "failed", "error": "boom"},
         ]
 
     monkeypatch.setattr(refresh_reports, "refresh_symbol_reports", fake_refresh)
-    code = run_cli("600519, 300024", False, "http://orch", tmp_path / "p.db", 5.0, 0.1)
+    code = run_cli("600519, 300024", False, "http://orch", tmp_path / "p.db")
     assert code == 1
     assert captured["symbols"] == ["600519", "300024"]
 
     monkeypatch.setattr(
         refresh_reports,
         "refresh_symbol_reports",
-        lambda symbols, orchestrator_url, db_path, run_timeout, poll_interval: [
-            {"symbol": "600519", "status": "completed", "run_id": "r1", "report_length": 10}
+        lambda symbols, orchestrator_url=None, db_path=None: [
+            {"symbol": "600519", "status": "submitted", "run_id": "r1"}
         ],
     )
-    assert run_cli("600519", False, "http://orch", tmp_path / "p.db", 5.0, 0.1) == 0
+    assert run_cli("600519", False, "http://orch", tmp_path / "p.db") == 0
 
 
 def test_run_cli_accepts_chinese_comma_and_dunhao(monkeypatch, tmp_path):
     captured: dict = {}
 
-    def fake_refresh(symbols, orchestrator_url, db_path, run_timeout, poll_interval):
+    def fake_refresh(symbols, orchestrator_url=None, db_path=None):
         captured["symbols"] = symbols
         return []
 
     monkeypatch.setattr(refresh_reports, "refresh_symbol_reports", fake_refresh)
-    run_cli("600487，600110、300024  600519", False, "http://orch", tmp_path / "p.db", 5.0, 0.1)
+    run_cli("600487，600110、300024  600519", False, "http://orch", tmp_path / "p.db")
     assert captured["symbols"] == ["600487", "600110", "300024", "600519"]
 
 
@@ -288,23 +326,19 @@ def test_run_cli_all_refreshes_distinct_symbols(monkeypatch, tmp_path):
     store.upsert("user-c", "600110", status="failed", outputs={})
     captured: dict = {}
 
-    def fake_refresh(symbols, orchestrator_url, db_path, run_timeout, poll_interval):
+    def fake_refresh(symbols, orchestrator_url=None, db_path=None):
         captured["symbols"] = symbols
         return [
             {
                 "symbol": symbol,
-                "status": "completed",
+                "status": "submitted",
                 "run_id": f"r-{symbol}",
-                "report_length": 10,
-                "fundamental_summary": None,
-                "outputs": [],
-                "updated_rows": 1,
             }
             for symbol in symbols
         ]
 
     monkeypatch.setattr(refresh_reports, "refresh_symbol_reports", fake_refresh)
-    code = run_cli(None, True, "http://orch", db_path, 5.0, 0.1)
+    code = run_cli(None, True, "http://orch", db_path)
     assert code == 0
     assert captured["symbols"] == ["300024", "600110", "600519"]
 
@@ -313,12 +347,12 @@ def test_run_cli_all_with_empty_db_does_nothing(monkeypatch, tmp_path):
     db_path = tmp_path / "empty.db"
     called = []
 
-    def fake_refresh(symbols, orchestrator_url, db_path, run_timeout, poll_interval):
+    def fake_refresh(symbols, orchestrator_url):
         called.append(symbols)
         return []
 
     monkeypatch.setattr(refresh_reports, "refresh_symbol_reports", fake_refresh)
-    code = run_cli(None, True, "http://orch", db_path, 5.0, 0.1)
+    code = run_cli(None, True, "http://orch", db_path)
     assert code == 0
     assert called == []
 
@@ -329,7 +363,7 @@ def test_run_cli_requires_symbols_or_all(monkeypatch, tmp_path):
         "refresh_symbol_reports",
         lambda *args, **kwargs: [],
     )
-    code = run_cli(None, False, "http://orch", tmp_path / "p.db", 5.0, 0.1)
+    code = run_cli(None, False, "http://orch", tmp_path / "p.db")
     assert code == 2
 
 
@@ -344,12 +378,9 @@ def test_distinct_watchlist_symbols_dedupes_across_users(tmp_path):
 def test_main_parser_has_refresh_reports_command():
     from main import build_parser
 
-    args = build_parser().parse_args(
-        ["refresh-reports", "--symbols", "600519,300024", "--timeout", "30"]
-    )
+    args = build_parser().parse_args(["refresh-reports", "--symbols", "600519,300024"])
     assert args.command == "refresh-reports"
     assert args.symbols == "600519,300024"
-    assert args.timeout == 30.0
     assert args.all is False
 
     args_all = build_parser().parse_args(["refresh-reports", "--all"])

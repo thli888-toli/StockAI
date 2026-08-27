@@ -145,7 +145,7 @@ class FakeAk:
             values = [8.0 + index * 0.05 for index in range(100)]
         else:
             values = [10.0 + index * 0.1 for index in range(100)]
-        dates = pd.bdate_range("2024-01-01", periods=100)
+        dates = pd.bdate_range("2024-09-01", periods=100)
         return pd.DataFrame({"date": dates, "value": values})
 
     def stock_zh_valuation_comparison_em(self, symbol):
@@ -155,11 +155,15 @@ class FakeAk:
         assert symbol == "证监会行业分类"
         return pd.DataFrame(
             {
-                "行业名称": ["酒、饮料和精制茶制造业", "农、林、牧、渔业"],
-                "公司数量": [50.0, 44.0],
-                "静态市盈率-中位数": [22.0, 73.51],
-                "静态市盈率-算术平均": [30.0, 101.28],
-                "静态市盈率-加权平均": [25.0, 19.16],
+                "行业名称": [
+                    "酒、饮料和精制茶制造业",
+                    "制造业",
+                    "农、林、牧、渔业",
+                ],
+                "公司数量": [50.0, 100.0, 44.0],
+                "静态市盈率-中位数": [22.0, 45.03, 73.51],
+                "静态市盈率-算术平均": [30.0, 106.64, 101.28],
+                "静态市盈率-加权平均": [25.0, 88.0, 19.16],
             }
         )
 
@@ -220,6 +224,24 @@ async def test_get_company_profile_uses_cninfo_and_market_data(fake_ak):
     )
     assert profile["company_name"] == "贵州茅台酒股份有限公司"
     assert profile["industry"] == "酒、饮料和精制茶制造业"
+
+
+@pytest.mark.asyncio
+async def test_company_profile_suppresses_eastmoney_warning_when_cninfo_ok(fake_ak):
+    fake_ak.stock_profile_cninfo = lambda symbol: pd.DataFrame(
+        {
+            "公司名称": ["贵州茅台酒股份有限公司"],
+            "A股简称": ["贵州茅台"],
+            "所属行业": ["酒、饮料和精制茶制造业"],
+        }
+    )
+    fake_ak.stock_individual_info_em = lambda symbol: (_ for _ in ()).throw(
+        RuntimeError("eastmoney down")
+    )
+    warnings: list[str] = []
+    profile = await tools.run_tool("get_company_profile", "600519", {}, warnings)
+    assert profile["company_name"] == "贵州茅台酒股份有限公司"
+    assert warnings == []
 
 
 @pytest.mark.asyncio
@@ -284,20 +306,79 @@ async def test_get_industry_valuation_comparison_falls_back_to_cninfo(fake_ak):
         [],
     )
     assert industry["source"] == "cninfo"
-    assert industry["pe"]["median"] == 22.0
+    assert industry["basis"] == "industry"
+    assert industry["peer_count"] is None
+    assert industry["industry"]["pe"]["median"] == 22.0
     assert industry["matched_industry"] == "酒、饮料和精制茶制造业"
+
+
+@pytest.mark.asyncio
+async def test_industry_match_prefers_exact_subindustry_over_coarse_row(fake_ak):
+    from plugins.stock_fundamental.tools import _match_industry_row
+
+    frame = fake_ak.stock_industry_pe_ratio_cninfo("证监会行业分类", "20260825")
+    matched = _match_industry_row(frame, ["酒、饮料和精制茶制造业"])
+    assert matched["industry_name"] == "酒、饮料和精制茶制造业"
+    assert matched["pe_median"] == 22.0
 
 
 @pytest.mark.asyncio
 async def test_get_industry_valuation_comparison_uses_eastmoney_when_available(fake_ak):
     fake_ak.stock_zh_valuation_comparison_em = lambda symbol: pd.DataFrame(
         {
-            "代码": ["600519", "600000"],
-            "简称": ["贵州茅台", "浦发银行"],
-            "市盈率-TTM": [20.03, 8.0],
-            "市净率-MRQ": [6.49, 0.6],
-            "市销率-TTM": [9.41, 1.0],
-            "行业": ["白酒Ⅱ", "银行"],
+            "代码": ["600519", "600000", "600009", "000858", "603288", "601888"],
+            "简称": ["贵州茅台", "浦发银行", "上海机场", "五粮液", "海天味业", "中国中免"],
+            "市盈率-TTM": [20.03, 8.0, 15.0, 22.0, 30.0, 12.0],
+            "市净率-MRQ": [6.49, 0.6, 2.0, 4.0, 9.0, 1.5],
+            "市销率-TTM": [9.41, 1.0, 3.0, 8.0, 12.0, 2.5],
+            "行业": ["白酒Ⅱ", "银行", "机场", "白酒Ⅱ", "食品", "旅游"],
+        }
+    )
+    comparison = await tools.run_tool(
+        "get_industry_valuation_comparison",
+        "600519",
+        {"industry": "酒、饮料和精制茶制造业"},
+        [],
+    )
+    assert comparison["source"] == "eastmoney"
+    assert comparison["basis"] == "peers"
+    assert comparison["peer_count"] == 5
+    assert comparison["peers"]["pe"]["stock"] == 20.03
+    assert comparison["peers"]["pe"]["median"] == pytest.approx(17.515)
+    assert comparison["peers"]["pb"]["median"] == pytest.approx(3.0)
+    assert len(comparison["peers"]["peer_list"]) == 5
+    assert comparison["peers"]["peer_list"][0]["name"] == "浦发银行"
+    assert comparison["peers"]["peer_list"][0]["pe_ttm"] == 8.0
+    # Industry benchmark is fetched even when peers exist (for cross-check).
+    assert comparison["industry"]["pe"]["median"] == 22.0
+
+
+@pytest.mark.asyncio
+async def test_manual_peers_take_priority_over_eastmoney(monkeypatch, fake_ak):
+    monkeypatch.setattr(
+        tools,
+        "MANUAL_PEERS",
+        {
+            "600519": [
+                {"code": "600000", "name": "浦发银行"},
+                {"code": "600009", "name": "上海机场"},
+            ]
+        },
+    )
+    fake_ak.stock_value_em = lambda symbol: pd.DataFrame(
+        {
+            "数据日期": ["2026-08-24"],
+            "当日收盘价": [100.0],
+            "总市值": [1e11],
+            "流通市值": [1e11],
+            "总股本": [1e9],
+            "流通股本": [1e9],
+            "PE(TTM)": [30.0 if symbol == "600000" else 20.0],
+            "PE(静)": [28.0],
+            "市净率": [3.0],
+            "PEG值": [1.0],
+            "市现率": [10.0],
+            "市销率": [5.0],
         }
     )
     comparison = await tools.run_tool(
@@ -306,10 +387,162 @@ async def test_get_industry_valuation_comparison_uses_eastmoney_when_available(f
         {"industry": "白酒"},
         [],
     )
-    assert comparison["source"] == "eastmoney"
-    assert comparison["pe"]["stock"] == 20.03
-    assert comparison["pe"]["median"] == pytest.approx(14.015)
-    assert comparison["pb"]["median"] == pytest.approx(3.545)
+    assert comparison["basis"] == "manual"
+    assert comparison["source"] == "manual"
+    assert comparison["peer_count"] == 2
+    assert comparison["peers"]["source"] == "manual"
+    assert comparison["peers"]["pe"]["median"] == pytest.approx(25.0)
+    assert [p["name"] for p in comparison["peers"]["peer_list"]] == [
+        "浦发银行",
+        "上海机场",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_manual_peers_fallback_when_all_fail(monkeypatch, fake_ak):
+    monkeypatch.setattr(
+        tools,
+        "MANUAL_PEERS",
+        {"600519": ["600000"]},
+    )
+    fake_ak.stock_value_em = lambda symbol: (_ for _ in ()).throw(
+        RuntimeError("value api down")
+    )
+    comparison = await tools.run_tool(
+        "get_industry_valuation_comparison",
+        "600519",
+        {"industry": "酒、饮料和精制茶制造业"},
+        [],
+    )
+    assert comparison["basis"] == "industry"
+    assert comparison["industry"]["pe"]["median"] == 22.0
+
+
+def _llm_peer_value_em(symbol):
+    return pd.DataFrame(
+        {
+            "数据日期": ["2026-08-24"],
+            "当日收盘价": [100.0],
+            "总市值": [1e11],
+            "流通市值": [1e11],
+            "总股本": [1e9],
+            "流通股本": [1e9],
+            "PE(TTM)": [30.0 if symbol == "600000" else 20.0],
+            "PE(静)": [28.0],
+            "市净率": [3.0],
+            "PEG值": [1.0],
+            "市现率": [10.0],
+            "市销率": [5.0],
+        }
+    )
+
+
+def _auto_peer_frame():
+    return pd.DataFrame(
+        {
+            "代码": ["600519", "600000", "600009", "000858", "603288", "601888"],
+            "简称": ["贵州茅台", "浦发银行", "上海机场", "五粮液", "海天味业", "中国中免"],
+            "市盈率-TTM": [20.03, 8.0, 15.0, 22.0, 30.0, 12.0],
+            "市净率-MRQ": [6.49, 0.6, 2.0, 4.0, 9.0, 1.5],
+            "市销率-TTM": [9.41, 1.0, 3.0, 8.0, 12.0, 2.5],
+            "行业": ["白酒Ⅱ", "银行", "机场", "白酒Ⅱ", "食品", "旅游"],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_llm_replaces_auto_peers_when_questionable(monkeypatch, fake_ak):
+    async def fake_llm(system, user, max_tokens=500):
+        return (
+            '{"changed": true, "reason": "候选与目标公司业务不匹配", '
+            '"peers": [{"code": "600000", "name": "浦发银行"}, '
+            '{"code": "600009", "name": "上海机场"}]}'
+        )
+
+    monkeypatch.setattr(tools, "llm_configured", lambda: True)
+    monkeypatch.setattr(tools, "llm_reply", fake_llm)
+    fake_ak.stock_zh_valuation_comparison_em = lambda symbol: _auto_peer_frame()
+    fake_ak.stock_value_em = _llm_peer_value_em
+
+    comparison = await tools.run_tool(
+        "get_industry_valuation_comparison",
+        "600519",
+        {"company_name": "贵州茅台", "industry": "白酒"},
+        [],
+    )
+    assert comparison["basis"] == "llm"
+    assert comparison["source"] == "llm"
+    assert comparison["peer_count"] == 2
+    assert comparison["peers"]["source"] == "llm"
+    assert comparison["peers"]["reason"] == "候选与目标公司业务不匹配"
+    assert [p["name"] for p in comparison["peers"]["peer_list"]] == [
+        "浦发银行",
+        "上海机场",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_llm_approves_auto_peers(monkeypatch, fake_ak):
+    async def fake_llm(system, user, max_tokens=500):
+        return '{"changed": false, "reason": "候选可比公司合理", "peers": []}'
+
+    monkeypatch.setattr(tools, "llm_configured", lambda: True)
+    monkeypatch.setattr(tools, "llm_reply", fake_llm)
+    fake_ak.stock_zh_valuation_comparison_em = lambda symbol: _auto_peer_frame()
+
+    comparison = await tools.run_tool(
+        "get_industry_valuation_comparison",
+        "600519",
+        {"company_name": "贵州茅台", "industry": "白酒"},
+        [],
+    )
+    assert comparison["basis"] == "peers"
+    assert comparison["llm_validated"] is True
+    assert comparison["llm_reason"] == "候选可比公司合理"
+    assert comparison["peer_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_keeps_auto_peers(monkeypatch, fake_ak):
+    async def fake_llm(system, user, max_tokens=500):
+        raise RuntimeError("llm unavailable")
+
+    monkeypatch.setattr(tools, "llm_configured", lambda: True)
+    monkeypatch.setattr(tools, "llm_reply", fake_llm)
+    fake_ak.stock_zh_valuation_comparison_em = lambda symbol: _auto_peer_frame()
+
+    warnings: list[str] = []
+    comparison = await tools.run_tool(
+        "get_industry_valuation_comparison",
+        "600519",
+        {"company_name": "贵州茅台", "industry": "白酒"},
+        warnings,
+    )
+    assert comparison["basis"] == "peers"
+    assert any("LLM 同行校验失败" in warning for warning in warnings)
+    assert comparison["peer_count"] == 5
+
+
+def test_load_manual_peers_parses_config(tmp_path):
+    config = tmp_path / "peers.yaml"
+    config.write_text(
+        """
+version: 1
+peers:
+  "688256":
+    - code: "688041"
+      name: "海光信息"
+    - "688047"
+""",
+        encoding="utf-8",
+    )
+    loaded = tools._load_manual_peers(config)
+    assert loaded == {
+        "688256": [
+            {"code": "688041", "name": "海光信息"},
+            "688047",
+        ]
+    }
 
 
 @pytest.mark.asyncio

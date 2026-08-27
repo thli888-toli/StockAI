@@ -8,12 +8,19 @@ cached in SQLite keyed by (symbol, tool, period_key) with per-tool TTLs.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import math
+import re
+import statistics
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 import pandas as pd
+import yaml
 
+from framework.llm import llm_configured, llm_reply
 from plugins.stock_common import (
     disable_http_proxy,
     json_dumps,
@@ -25,6 +32,24 @@ from plugins.stock_fundamental.valuation import estimate_fair_value
 
 
 FUNDAMENTAL_CACHE = FundamentalCacheStore()
+PEER_MIN_COUNT = 5
+CACHE_VERSION = 8
+LLM_VALIDATION_TIMEOUT = 60.0
+
+
+def _load_manual_peers(path: str | Path | None = None) -> dict[str, list[Any]]:
+    config_path = Path(path) if path else Path(__file__).resolve().parents[2] / "config" / "fundamental_peers.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    peers = data.get("peers") or {}
+    return {str(symbol): list(entries or []) for symbol, entries in peers.items()}
+
+
+MANUAL_PEERS = _load_manual_peers()
 
 
 def _num(value: Any) -> float | None:
@@ -209,7 +234,14 @@ async def _get_company_profile(
             profile["listing_date"] = profile.get("listing_date") or mapping.get("上市时间") or None
             profile["source"] = profile["source"] if profile["source"] != "market_data" else "eastmoney"
     except Exception as exc:  # noqa: BLE001
-        warnings.append(f"get_company_profile eastmoney 失败: {exc}")
+        # Eastmoney profile is an enrichment on top of CNINFO; only warn when
+        # we still lack basic name/industry so reports don't drown in noise.
+        if (
+            not profile.get("company_name")
+            or profile.get("company_name") == symbol
+            or not profile.get("industry")
+        ):
+            warnings.append(f"get_company_profile eastmoney 失败: {exc}")
 
     if not profile.get("company_name") or profile.get("company_name") == symbol:
         profile["company_name"] = market_data.get("company_name") or symbol
@@ -726,7 +758,7 @@ async def _get_historical_valuation_percentile(
     market_data: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    result: dict[str, Any] = {"symbol": symbol, "window": "近三年", "metrics": {}}
+    result: dict[str, Any] = {"symbol": symbol, "window": "近两年", "metrics": {}}
     for key, indicator in BAIDU_INDICATORS:
         try:
             frame = await run_blocking(
@@ -742,7 +774,12 @@ async def _get_historical_valuation_percentile(
             )
             if frame is None or frame.empty or "value" not in frame.columns:
                 continue
-            stats = _percentile_stats(frame["value"])
+            working = frame.copy()
+            if "date" in working.columns:
+                cutoff = pd.Timestamp.now() - pd.DateOffset(years=2)
+                dates = pd.to_datetime(working["date"], errors="coerce")
+                working = working[dates >= cutoff]
+            stats = _percentile_stats(working["value"])
             if stats:
                 result["metrics"][key] = stats
         except Exception as exc:  # noqa: BLE001
@@ -771,17 +808,24 @@ def _match_industry_row(frame: pd.DataFrame, candidates: list[str]) -> dict[str,
             candidate = (candidate or "").strip()
             if not candidate:
                 continue
-            if candidate in industry_name or industry_name in candidate:
-                score = len(candidate)
-                if score > best_score:
-                    best_score = score
-                    best = {
-                        "industry_name": industry_name,
-                        "company_count": _num(row.get("公司数量")),
-                        "pe_median": _num(row.get("静态市盈率-中位数")),
-                        "pe_mean": _num(row.get("静态市盈率-算术平均")),
-                        "pe_weighted": _num(row.get("静态市盈率-加权平均")),
-                    }
+            exact = candidate == industry_name
+            if not exact and not (
+                candidate in industry_name or industry_name in candidate
+            ):
+                continue
+            # Exact matches always beat substring matches; longer names win
+            # ties so the specific sub-industry row is preferred over coarse
+            # level-1 rows like "制造业".
+            score = 1000 + len(industry_name) if exact else len(candidate)
+            if score > best_score:
+                best_score = score
+                best = {
+                    "industry_name": industry_name,
+                    "company_count": _num(row.get("公司数量")),
+                    "pe_median": _num(row.get("静态市盈率-中位数")),
+                    "pe_mean": _num(row.get("静态市盈率-算术平均")),
+                    "pe_weighted": _num(row.get("静态市盈率-加权平均")),
+                }
     return best
 
 
@@ -790,7 +834,33 @@ async def _get_industry_valuation_comparison(
     market_data: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
-    result: dict[str, Any] = {"symbol": symbol, "source": "", "matched_industry": ""}
+    result: dict[str, Any] = {
+        "symbol": symbol,
+        "source": "",
+        "basis": "",
+        "peer_count": None,
+        "matched_industry": "",
+    }
+    manual_peers = MANUAL_PEERS.get(symbol)
+    if manual_peers:
+        try:
+            stats, peer_list, peer_count = await _fetch_peer_stats(
+                manual_peers, symbol, warnings
+            )
+            if peer_count > 0:
+                stats["peer_list"] = peer_list
+                stats["source"] = "manual"
+                result.update(
+                    {
+                        "source": "manual",
+                        "basis": "manual",
+                        "peer_count": peer_count,
+                        "peers": stats,
+                        "matched_industry": "",
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"get_industry_valuation_comparison manual peers 失败: {exc}")
     try:
         frame = await run_blocking(
             lambda: _call_ak(
@@ -801,8 +871,11 @@ async def _get_industry_valuation_comparison(
         )
         if frame is not None and not frame.empty and "简称" in frame.columns:
             comparison = _comparison_stats(frame, symbol)
-            if comparison:
-                result.update(comparison)
+            peer_count = len(comparison.get("peer_list") or [])
+            if comparison and peer_count >= PEER_MIN_COUNT:
+                result["peers"] = comparison
+                result["peer_count"] = peer_count
+                result["basis"] = "peers"
                 result["source"] = "eastmoney"
                 result["matched_industry"] = str(
                     frame.get("行业", pd.Series([""])).iloc[0] or ""
@@ -810,44 +883,235 @@ async def _get_industry_valuation_comparison(
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"get_industry_valuation_comparison eastmoney 失败: {exc}")
 
-    if not result.get("pe"):
-        trading_dates = [
-            (_latest_trading_date() - timedelta(days=offset)).strftime("%Y%m%d")
-            for offset in range(0, 6)
-        ]
-        for trading_date in trading_dates:
-            try:
-                frame = await run_blocking(
-                    lambda trading_date=trading_date: _call_ak(
-                        lambda ak: ak.stock_industry_pe_ratio_cninfo(
-                            symbol="证监会行业分类",
-                            date=trading_date,
-                        )
-                    ),
-                    timeout=30.0,
-                    retries=0,
+    if result.get("basis") == "peers":
+        try:
+            llm_result = await _validate_peers_with_llm(
+                symbol,
+                market_data,
+                (result.get("peers") or {}).get("peer_list") or [],
+            )
+            if llm_result.get("changed") and llm_result.get("peers"):
+                stats, peer_list, peer_count = await _fetch_peer_stats(
+                    llm_result["peers"], symbol, warnings
                 )
-                candidates = [
-                    str(market_data.get("industry") or ""),
-                    str(result.get("matched_industry") or ""),
-                ]
-                matched = _match_industry_row(frame, candidates)
-                if matched:
-                    result["pe"] = {
+                if peer_count > 0:
+                    stats["peer_list"] = peer_list
+                    stats["source"] = "llm"
+                    stats["reason"] = llm_result.get("reason", "")
+                    result.update(
+                        {
+                            "source": "llm",
+                            "basis": "llm",
+                            "peer_count": peer_count,
+                            "matched_industry": str(market_data.get("industry") or ""),
+                            "peers": stats,
+                            "llm_validated": True,
+                        }
+                    )
+            else:
+                result["llm_validated"] = True
+                result["llm_reason"] = llm_result.get("reason", "")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"LLM 同行校验失败: {exc}")
+
+    # Always try to attach the whole-industry PE benchmark (used to cross-check
+    # peers and as the anchor when peers are missing or unreliable).
+    trading_dates = [
+        (_latest_trading_date() - timedelta(days=offset)).strftime("%Y%m%d")
+        for offset in range(0, 6)
+    ]
+    for trading_date in trading_dates:
+        try:
+            frame = await run_blocking(
+                lambda trading_date=trading_date: _call_ak(
+                    lambda ak: ak.stock_industry_pe_ratio_cninfo(
+                        symbol="证监会行业分类",
+                        date=trading_date,
+                    )
+                ),
+                timeout=30.0,
+                retries=0,
+            )
+            candidates = [
+                str(market_data.get("industry") or ""),
+                str(result.get("matched_industry") or ""),
+            ]
+            matched = _match_industry_row(frame, candidates)
+            if matched:
+                result["industry"] = {
+                    "pe": {
                         "median": matched["pe_median"],
                         "mean": matched["pe_mean"],
                         "weighted": matched["pe_weighted"],
                     }
-                    result["matched_industry"] = matched["industry_name"]
-                    result["company_count"] = matched["company_count"]
+                }
+                result["matched_industry"] = matched["industry_name"]
+                result["company_count"] = matched["company_count"]
+                if not result.get("peers"):
+                    result["basis"] = "industry"
                     result["source"] = "cninfo"
-                    break
-            except Exception as exc:  # noqa: BLE001
-                warnings.append(f"get_industry_valuation_comparison cninfo {trading_date} 失败: {exc}")
+                break
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"get_industry_valuation_comparison cninfo {trading_date} 失败: {exc}")
 
-    if not result.get("pe") and not result.get("pb") and not result.get("ps"):
+    if not result.get("peers") and not result.get("industry"):
         raise RuntimeError("行业估值对比数据获取失败")
     return result
+
+
+async def _fetch_peer_stats(
+    peers_config: list[Any],
+    symbol: str,
+    warnings: list[str],
+) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
+    """Fetch valuation multiples for a configured/suggested peer list."""
+    pe_values: list[float] = []
+    pb_values: list[float] = []
+    ps_values: list[float] = []
+    peer_list: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in peers_config:
+        if isinstance(entry, dict):
+            code = str(entry.get("code") or "").strip()
+            name = str(entry.get("name") or "").strip()
+        else:
+            code = str(entry or "").strip()
+            name = ""
+        if not code or code == symbol:
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        try:
+            frame = await run_blocking(
+                lambda code=code: _call_ak(lambda ak: ak.stock_value_em(symbol=code)),
+                timeout=20.0,
+                retries=1,
+            )
+            records = _records_from_frame(
+                frame,
+                VALUE_EM_COLUMNS,
+                limit=1,
+                sort_by="数据日期",
+                ascending=False,
+            )
+            if not records:
+                continue
+            row = records[0]
+            pe = _num(row.get("pe_ttm"))
+            pb = _num(row.get("pb"))
+            ps = _num(row.get("ps"))
+            if pe is None and pb is None and ps is None:
+                continue
+            if pe is not None and pe > 0:
+                pe_values.append(pe)
+            if pb is not None and pb > 0:
+                pb_values.append(pb)
+            if ps is not None and ps > 0:
+                ps_values.append(ps)
+            peer_list.append(
+                {
+                    "code": code,
+                    "name": name or code,
+                    "pe_ttm": pe,
+                    "pb": pb,
+                    "ps": ps,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"get_industry_valuation_comparison manual peer {code} 失败: {exc}")
+    if not peer_list:
+        raise RuntimeError("手动可比公司均获取失败")
+    stats: dict[str, Any] = {}
+    if pe_values:
+        stats["pe"] = {
+            "median": _num(statistics.median(pe_values)),
+            "mean": _num(statistics.mean(pe_values)),
+        }
+    if pb_values:
+        stats["pb"] = {
+            "median": _num(statistics.median(pb_values)),
+            "mean": _num(statistics.mean(pb_values)),
+        }
+    if ps_values:
+        stats["ps"] = {
+            "median": _num(statistics.median(ps_values)),
+            "mean": _num(statistics.mean(ps_values)),
+        }
+    return stats, peer_list, len(peer_list)
+
+
+def _extract_json_object(text: str | None) -> dict[str, Any] | None:
+    if not text:
+        return None
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    candidate = match.group(1) if match else text
+    start = candidate.find("{")
+    end = candidate.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        parsed = json.loads(candidate[start : end + 1])
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+async def _validate_peers_with_llm(
+    symbol: str,
+    market_data: dict[str, Any],
+    peer_list: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Ask the LLM to validate/replace the AkShare-sourced comparable list."""
+    if not llm_configured() or not peer_list:
+        return {"changed": False, "reason": "", "peers": []}
+    company_name = str(market_data.get("company_name") or symbol)
+    industry = str(market_data.get("industry") or "")
+    candidates = [
+        {
+            "code": str(item.get("code") or ""),
+            "name": str(item.get("name") or item.get("code") or ""),
+        }
+        for item in peer_list
+        if item.get("code")
+    ]
+    prompt = (
+        "你是A股行业可比公司评审专家。下面是一只目标股票及其当前候选可比公司列表，"
+        "请判断候选列表是否与目标公司真正可比（同行业、业务/规模/盈利模式相近）。\n"
+        "只返回一个 JSON 对象："
+        '{"changed": true/false, "reason": "一句话说明", '
+        '"peers": [{"code": "6位代码", "name": "简称"}]}。'
+        "changed=false 时 peers 可以为空；changed=true 时 peers 必须给出"
+        "你认为最合适的 A 股可比公司（5-10 家，6 位代码）。\n\n"
+        f"目标公司：{symbol} {company_name}（{industry}）\n"
+        f"候选可比公司：{json.dumps(candidates, ensure_ascii=False)}\n"
+    )
+    response = await asyncio.wait_for(
+        llm_reply(
+            "你只输出严格的 JSON，不要输出任何其他文字。",
+            prompt,
+            max_tokens=500,
+        ),
+        timeout=LLM_VALIDATION_TIMEOUT,
+    )
+    parsed = _extract_json_object(response)
+    if parsed is None:
+        return {"changed": False, "reason": "", "peers": []}
+    peers: list[dict[str, Any]] = []
+    for item in parsed.get("peers") or []:
+        if isinstance(item, dict):
+            code = str(item.get("code") or "").strip()
+            name = str(item.get("name") or "").strip()
+        else:
+            code = str(item or "").strip()
+            name = ""
+        if code and code != symbol:
+            peers.append({"code": code, "name": name or code})
+    return {
+        "changed": bool(parsed.get("changed")),
+        "reason": str(parsed.get("reason") or ""),
+        "peers": peers,
+    }
 
 
 def _comparison_stats(frame: pd.DataFrame, symbol: str) -> dict[str, Any]:
@@ -855,12 +1119,31 @@ def _comparison_stats(frame: pd.DataFrame, symbol: str) -> dict[str, Any]:
     pb_column = _pick_column(frame, ("市净率-MRQ", "市净率-MRQ(最新)", "PB_MRQ"))
     ps_column = _pick_column(frame, ("市销率-TTM",))
     code_column = _pick_column(frame, ("代码", "证券代码"))
+    name_column = _pick_column(frame, ("简称", "名称"))
+    working = frame.copy()
+    if name_column:
+        working = working[
+            ~working[name_column].astype(str).isin(["行业中值", "行业平均"])
+        ]
+    working = working.reset_index(drop=True)
     result: dict[str, Any] = {}
-    if pe_column:
-        values = pd.to_numeric(frame[pe_column], errors="coerce").dropna()
+    pe_forward: dict[str, float | None] = {}
+    for column in working.columns:
+        match = re.fullmatch(r"市盈率-(\d{2})E", str(column))
+        if not match:
+            continue
+        year = 2000 + int(match.group(1))
+        values = pd.to_numeric(working[column], errors="coerce").dropna()
         if not values.empty:
-            stock_row = frame[
-                frame[code_column].astype(str).str.zfill(6) == symbol
+            pe_forward[str(year)] = _num(values.median())
+    if pe_forward:
+        result["pe_forward"] = pe_forward
+    if pe_column:
+        values = pd.to_numeric(working[pe_column], errors="coerce").dropna()
+        values = values[values > 0]
+        if not values.empty:
+            stock_row = working[
+                working[code_column].astype(str).str.zfill(6) == symbol
             ] if code_column else pd.DataFrame()
             stock_pe = (
                 _num(pd.to_numeric(stock_row[pe_column], errors="coerce").iloc[0])
@@ -873,13 +1156,30 @@ def _comparison_stats(frame: pd.DataFrame, symbol: str) -> dict[str, Any]:
                 "mean": _num(values.mean()),
             }
     if pb_column:
-        values = pd.to_numeric(frame[pb_column], errors="coerce").dropna()
+        values = pd.to_numeric(working[pb_column], errors="coerce").dropna()
+        values = values[values > 0]
         if not values.empty:
             result["pb"] = {"median": _num(values.median()), "mean": _num(values.mean())}
     if ps_column:
-        values = pd.to_numeric(frame[ps_column], errors="coerce").dropna()
+        values = pd.to_numeric(working[ps_column], errors="coerce").dropna()
+        values = values[values > 0]
         if not values.empty:
             result["ps"] = {"median": _num(values.median()), "mean": _num(values.mean())}
+    peer_list: list[dict[str, Any]] = []
+    for _, row in working.head(15).iterrows():
+        code = _text(row.get(code_column)) if code_column else ""
+        if code == symbol:
+            continue
+        peer_list.append(
+            {
+                "code": code,
+                "name": _text(row.get(name_column)) if name_column else "",
+                "pe_ttm": _num(row.get(pe_column)) if pe_column else None,
+                "pb": _num(row.get(pb_column)) if pb_column else None,
+                "ps": _num(row.get(ps_column)) if ps_column else None,
+            }
+        )
+    result["peer_list"] = peer_list
     return result
 
 
@@ -1031,11 +1331,13 @@ async def run_tool(
         raise ValueError(f"未知工具: {name}")
     func = spec["func"]
     cache_seconds = int(spec.get("cache_seconds", 0))
-    period_key = date.today().isoformat()
+    period_key = f"{date.today().isoformat()}#v{CACHE_VERSION}"
     if cache_seconds > 0:
         cached = FUNDAMENTAL_CACHE.get(symbol, name, period_key, cache_seconds)
         if cached:
-            return json_loads(cached, {})
+            result = json_loads(cached, {})
+            if _cache_shape_valid(name, result):
+                return result
     if name == "estimate_fair_value":
         result = func(metrics or {})
     else:
@@ -1045,3 +1347,12 @@ async def run_tool(
     if cache_seconds > 0:
         FUNDAMENTAL_CACHE.put(symbol, name, period_key, json_dumps(result))
     return result
+
+
+def _cache_shape_valid(name: str, result: Any) -> bool:
+    """Reject cached payloads written by older tool versions."""
+    if not isinstance(result, dict):
+        return False
+    if name == "get_industry_valuation_comparison":
+        return bool(result.get("peers") or result.get("industry"))
+    return True

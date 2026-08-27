@@ -488,3 +488,89 @@ def test_fibonacci_levels_bracket_last_close():
     )
     support, resistance = stock_portal_app._fibonacci_levels(frame)
     assert support < 10.5 < resistance
+
+
+def test_chart_snapshot_store_roundtrip_and_limit(tmp_path):
+    store = WatchlistStore(tmp_path / "watchlist.db")
+    for index in range(25):
+        store.save_chart_snapshot(
+            "u1",
+            "600519",
+            "daily",
+            {"candles": [{"time": "2024-01-01", "close": float(index)}]},
+            label=f"label{index}",
+        )
+
+    snapshots = store.list_chart_snapshots("u1", "600519")
+    assert len(snapshots) == 20
+    assert snapshots[0]["label"] == "label24"
+
+    snapshot = store.get_chart_snapshot("u1", "600519", snapshots[0]["id"])
+    assert snapshot is not None
+    assert snapshot["payload"]["candles"][0]["close"] == 24.0
+
+    assert store.get_chart_snapshot("u2", "600519", snapshots[0]["id"]) is None
+    assert store.delete_chart_snapshot("u1", "600519", snapshots[0]["id"]) is True
+    assert store.get_chart_snapshot("u1", "600519", snapshots[0]["id"]) is None
+
+
+def test_chart_snapshot_api_save_list_get_delete(tmp_path):
+    dates = pd.bdate_range("2024-01-01", periods=120)
+    close = pd.Series(range(100, 220), dtype="float64")
+    market_data = {
+        "daily_features": [
+            {
+                "date": day.strftime("%Y-%m-%d"),
+                "open": float(price - 1),
+                "high": float(price + 1),
+                "low": float(price - 2),
+                "close": float(price),
+                "volume": 1000.0,
+            }
+            for day, price in zip(dates, close)
+        ]
+    }
+
+    app = _make_app(tmp_path)
+    with TestClient(app) as client:
+        login = client.post("/api/login", json={"nickname": "snap_user"})
+        login_body = login.json()
+        store = WatchlistStore(tmp_path / "watchlist.db")
+        store.upsert(
+            login_body["user_id"],
+            "600988",
+            run_id="r1",
+            status="completed",
+            outputs={"market_data": json.dumps(market_data)},
+        )
+        headers = {"Authorization": f"Bearer {login_body['token']}"}
+
+        saved = client.post(
+            "/api/watchlist/600988/chart/save",
+            json={"period": "daily"},
+            headers=headers,
+        )
+        assert saved.status_code == 200
+        snapshot_id = saved.json()["id"]
+
+        listing = client.get("/api/watchlist/600988/charts", headers=headers)
+        assert listing.status_code == 200
+        assert len(listing.json()) == 1
+
+        snapshot = client.get(
+            f"/api/watchlist/600988/charts/{snapshot_id}", headers=headers
+        )
+        assert snapshot.status_code == 200
+        assert snapshot.json()["payload"]["symbol"] == "600988"
+
+        deleted = client.delete(
+            f"/api/watchlist/600988/charts/{snapshot_id}", headers=headers
+        )
+        assert deleted.status_code == 200
+        assert deleted.json() == {"deleted": True}
+        assert (
+            client.get(
+                f"/api/watchlist/600988/charts/{snapshot_id}", headers=headers
+            ).status_code
+            == 404
+        )

@@ -110,7 +110,13 @@ def _fake_run_tool(all_fail: bool = False):
                 },
             }
         if name == "get_industry_valuation_comparison":
-            return {"symbol": symbol, "source": "cninfo", "pe": {"median": 22.0, "mean": 30.0}}
+            return {
+                "symbol": symbol,
+                "source": "cninfo",
+                "basis": "industry",
+                "peer_count": None,
+                "industry": {"pe": {"median": 22.0, "mean": 30.0}},
+            }
         if name == "get_earnings_forecast":
             return {"symbol": symbol, "research_reports": [], "earnings_guidance": []}
         if name == "estimate_fair_value":
@@ -152,7 +158,7 @@ async def test_handler_produces_analysis_report_section_and_summary(monkeypatch)
     assert set(payload) == {"analysis", "report_section", "summary"}
     assert payload["analysis"]["symbol"] == "600519"
     assert payload["analysis"]["industry"] == "白酒"
-    assert payload["analysis"]["metrics"]["industry"]["pe"]["median"] == 22.0
+    assert payload["analysis"]["metrics"]["industry_bench"]["pe"]["median"] == 22.0
     assert payload["analysis"]["valuation"]["fair_value_range"]["mid"] == 1500.0
     assert "## 基本面与估值" in payload["report_section"]
     assert "低估" in payload["report_section"]
@@ -206,3 +212,43 @@ def test_ttm_annual_report_returns_cumulative_value():
     assert fundamental_service._ttm(records, "value") is None
     annual = [{"report_date": "2025-12-31", "value": 61.0}]
     assert fundamental_service._ttm(annual, "value") == 61.0
+
+
+def test_build_report_section_marks_restructuring_in_progress():
+    analysis = {
+        "symbol": "000506",
+        "company_name": "招金黄金",
+        "metrics": {
+            "current_price": 20.21,
+            "bps": 0.97,
+            "sps_ttm": 0.75,
+            "eps_ttm": 0.367,
+            "valuation": {},
+            "historical": {},
+            "industry_peers": {},
+            "industry_bench": {},
+            "ocf_ttm": None,
+            "fcf": None,
+            "dps": None,
+            "roe": None,
+        },
+        "valuation": {
+            "fair_value_range": {"low": None, "mid": None, "high": None},
+            "verdict": {
+                "label": "重组/注入中",
+                "current_price": 20.21,
+                "margin": None,
+            },
+            "available_methods": [],
+            "excluded_methods": [],
+            "per_method": {},
+        },
+        "indicators": {"latest": {}},
+        "statements": {"periods": []},
+        "valuation_snapshot": {},
+        "data_quality": {"missing": [], "methods_available": [], "warnings": []},
+        "warnings": [],
+    }
+    section = fundamental_service._build_report_section(analysis)
+    assert "重组/注入中" in section
+    assert "相对估值不适用" in section

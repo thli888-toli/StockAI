@@ -28,8 +28,15 @@ COLUMNS = [
 class StockHistoryStore:
     """Stores daily bars once and appends only newly fetched data."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        table: str = "stock_history_bars",
+        meta_table: str = "stock_history_meta",
+    ) -> None:
         self.db_path = Path(db_path)
+        self.table = table
+        self.meta_table = meta_table
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._lock = threading.Lock()
@@ -38,8 +45,8 @@ class StockHistoryStore:
     def _create_tables(self) -> None:
         with self._lock, self._conn:
             self._conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS stock_history_bars (
+                f"""
+                CREATE TABLE IF NOT EXISTS {self.table} (
                     symbol TEXT NOT NULL,
                     adjust TEXT NOT NULL,
                     trade_date TEXT NOT NULL,
@@ -54,9 +61,9 @@ class StockHistoryStore:
                     updated_at REAL NOT NULL,
                     PRIMARY KEY(symbol, adjust, trade_date)
                 );
-                CREATE INDEX IF NOT EXISTS idx_stock_history_bars_symbol_date
-                    ON stock_history_bars(symbol, adjust, trade_date);
-                CREATE TABLE IF NOT EXISTS stock_history_meta (
+                CREATE INDEX IF NOT EXISTS idx_{self.table}_symbol_date
+                    ON {self.table}(symbol, adjust, trade_date);
+                CREATE TABLE IF NOT EXISTS {self.meta_table} (
                     symbol TEXT NOT NULL,
                     adjust TEXT NOT NULL,
                     start_date TEXT NOT NULL,
@@ -71,9 +78,9 @@ class StockHistoryStore:
     def get_meta(self, symbol: str, adjust: str = "qfq") -> dict[str, Any] | None:
         with self._lock:
             row = self._conn.execute(
-                """
+                f"""
                 SELECT start_date, end_date, row_count, updated_at
-                FROM stock_history_meta
+                FROM {self.meta_table}
                 WHERE symbol=? AND adjust=?
                 """,
                 (symbol, adjust),
@@ -132,7 +139,7 @@ class StockHistoryStore:
             rows = self._conn.execute(
                 f"""
                 SELECT trade_date, open, high, low, close, volume, amount, turnover, pct_change
-                FROM stock_history_bars
+                FROM {self.table}
                 WHERE {' AND '.join(where)}
                 ORDER BY trade_date
                 """,
@@ -177,8 +184,8 @@ class StockHistoryStore:
 
         with self._lock, self._conn:
             self._conn.executemany(
-                """
-                INSERT INTO stock_history_bars(
+                f"""
+                INSERT INTO {self.table}(
                     symbol, adjust, trade_date, open, high, low, close,
                     volume, amount, turnover, pct_change, updated_at
                 )
@@ -200,9 +207,9 @@ class StockHistoryStore:
 
     def _update_meta(self, symbol: str, adjust: str, now: float) -> None:
         row = self._conn.execute(
-            """
+            f"""
             SELECT MIN(trade_date), MAX(trade_date), COUNT(*)
-            FROM stock_history_bars
+            FROM {self.table}
             WHERE symbol=? AND adjust=?
             """,
             (symbol, adjust),
@@ -210,8 +217,8 @@ class StockHistoryStore:
         if not row or row[0] is None:
             return
         self._conn.execute(
-            """
-            INSERT INTO stock_history_meta(symbol, adjust, start_date, end_date, row_count, updated_at)
+            f"""
+            INSERT INTO {self.meta_table}(symbol, adjust, start_date, end_date, row_count, updated_at)
             VALUES(?, ?, ?, ?, ?, ?)
             ON CONFLICT(symbol, adjust) DO UPDATE SET
                 start_date=excluded.start_date,
