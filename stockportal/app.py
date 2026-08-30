@@ -30,6 +30,10 @@ class WatchlistAddPayload(BaseModel):
     query: str
 
 
+class WatchlistTagPayload(BaseModel):
+    tags: list[str] = []
+
+
 class LoginPayload(BaseModel):
     openid: str | None = None
     nickname: str | None = None
@@ -560,6 +564,20 @@ def create_stock_portal_app(
         if not store.delete(user["user_id"], symbol):
             raise HTTPException(status_code=404, detail="watchlist symbol not found")
         return {"deleted": True}
+
+    @app.put("/api/watchlist/{symbol}/tags")
+    def update_watchlist_tags(
+        symbol: str,
+        payload: WatchlistTagPayload,
+        user: dict[str, Any] = Depends(get_current_user),
+    ):
+        symbol = _validate_symbol(symbol)
+        if store.get(user["user_id"], symbol) is None:
+            raise HTTPException(status_code=404, detail="watchlist symbol not found")
+        item = store.update_tags(user["user_id"], symbol, payload.tags)
+        if item is None:
+            raise HTTPException(status_code=404, detail="watchlist symbol not found")
+        return item
 
     @app.get("/api/watchlist/{symbol}/chart")
     def chart(

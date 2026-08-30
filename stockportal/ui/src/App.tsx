@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api, getToken, setToken } from "./api";
@@ -19,6 +19,9 @@ export default function App() {
   const [modal, setModal] = useState<ModalState>(null);
   const [user, setUser] = useState<User | null>(null);
   const [loginNickname, setLoginNickname] = useState("");
+  const [tagDrafts, setTagDrafts] = useState<Record<string, string>>({});
+  const [tagQuery, setTagQuery] = useState("");
+  const [tagSort, setTagSort] = useState<"none" | "asc" | "desc">("none");
   const pollRef = useRef<number | null>(null);
   const [chartSnapshots, setChartSnapshots] = useState<
     { id: number; period: string; label: string; saved_at: string }[]
@@ -232,6 +235,58 @@ export default function App() {
     }
   };
 
+  const saveTags = async (item: WatchlistItem, nextTags: string[]) => {
+    setError("");
+    try {
+      const updated = await api.updateTags(item.symbol, nextTags);
+      setItems((prev) =>
+        prev.map((existing) => (existing.symbol === updated.symbol ? updated : existing))
+      );
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
+    }
+  };
+
+  const addTag = (item: WatchlistItem) => {
+    const draft = (tagDrafts[item.symbol] ?? "").trim();
+    if (!draft) return;
+    const next = [
+      ...new Set([
+        ...(item.tags || []),
+        ...draft
+          .split(/[,，、\s]+/)
+          .map((tag) => tag.trim())
+          .filter(Boolean)
+      ])
+    ];
+    setTagDrafts((prev) => ({ ...prev, [item.symbol]: "" }));
+    void saveTags(item, next);
+  };
+
+  const removeTag = (item: WatchlistItem, tag: string) => {
+    void saveTags(item, (item.tags || []).filter((existing) => existing !== tag));
+  };
+
+  const visibleItems = useMemo(() => {
+    let list = items;
+    const query = tagQuery.trim().toLowerCase();
+    if (query) {
+      const wanted = query.split(/[,，、\s]+/).filter(Boolean);
+      list = list.filter((item) => {
+        const tags = (item.tags || []).map((tag) => tag.toLowerCase());
+        return wanted.every((word) => tags.some((tag) => tag.includes(word)));
+      });
+    }
+    if (tagSort !== "none") {
+      const key = (item: WatchlistItem) => (item.tags || []).join(",").toLowerCase();
+      list = [...list].sort((a, b) => {
+        const compared = key(a).localeCompare(key(b));
+        return tagSort === "asc" ? compared : -compared;
+      });
+    }
+    return list;
+  }, [items, tagQuery, tagSort]);
+
   const rawReport = modal?.kind === "report"
     ? (modal.item.outputs?.report as string | undefined)
     : undefined;
@@ -289,11 +344,28 @@ export default function App() {
 
       <section className="card">
         <h2>监控列表</h2>
+        <div className="watchlist-toolbar">
+          <input
+            value={tagQuery}
+            onChange={(event) => setTagQuery(event.target.value)}
+            placeholder="按标签搜索（多个标签用逗号分隔）"
+          />
+          <select
+            value={tagSort}
+            onChange={(event) => setTagSort(event.target.value as "none" | "asc" | "desc")}
+          >
+            <option value="none">默认排序</option>
+            <option value="asc">标签 A→Z</option>
+            <option value="desc">标签 Z→A</option>
+          </select>
+        </div>
         {items.length === 0 ? (
           <p>暂无监控股票。</p>
+        ) : visibleItems.length === 0 ? (
+          <p>没有匹配的标签。</p>
         ) : (
           <ul className="watchlist">
-            {items.map((item) => (
+            {visibleItems.map((item) => (
               <li key={item.symbol} className="watchlist-row">
                 <div className="watchlist-main">
                   <strong>{item.symbol}</strong>
@@ -308,6 +380,37 @@ export default function App() {
                           ? "已完成"
                           : "失败"}
                   </span>
+                </div>
+                <div className="watchlist-tags">
+                  {(item.tags || []).map((tag) => (
+                    <span key={tag} className="tag">
+                      {tag}
+                      <button
+                        className="tag-remove"
+                        onClick={() => removeTag(item, tag)}
+                        aria-label={`删除标签 ${tag}`}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                  <input
+                    className="tag-input"
+                    value={tagDrafts[item.symbol] ?? ""}
+                    onChange={(event) =>
+                      setTagDrafts((prev) => ({
+                        ...prev,
+                        [item.symbol]: event.target.value
+                      }))
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") addTag(item);
+                    }}
+                    onBlur={() => {
+                      if ((tagDrafts[item.symbol] ?? "").trim()) addTag(item);
+                    }}
+                    placeholder="+ 标签"
+                  />
                 </div>
                 <div className="watchlist-actions">
                   {(item.status === "running" || item.status === "queued") && (
