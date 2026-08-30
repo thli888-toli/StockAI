@@ -49,6 +49,15 @@ PEER_INDUSTRY_BAND = (0.6, 1.6)
 GROWTH_LEADER_THRESHOLD = 0.30
 RESTRUCTURING_PB_RATIO = 10.0
 RESTRUCTURING_PS_RATIO = 10.0
+RESTRUCTURING_MAX_EPS = 0.5
+RESTRUCTURING_MIN_BPS = 1.0
+RESTRUCTURING_MIN_SPS = 1.0
+PS_PEER_DIVERGENCE_FACTOR = 2.5
+CYCLICAL_BOOM_PE_RATIO = 0.5
+LEADER_HISTORY_WEIGHT = 0.5
+LEADER_HISTORY_CAP_FACTOR = 1.5
+PEER_OWN_PREMIUM_FACTOR = 2.0
+PEER_MISMATCH_KEYWORDS = ("不匹配", "应替换为")
 
 
 def _num(value: Any) -> float | None:
@@ -62,23 +71,32 @@ def _num(value: Any) -> float | None:
 
 
 def _restructuring_in_progress(metrics: dict[str, Any]) -> bool:
-    """Detect restructuring/asset-injection shells.
+    """Detect restructuring/asset-injection shells without flagging profitable
+    high-multiple growth names.
 
-    When a company's reported per-share book value and per-share revenue are
-    extremely small relative to its market price, the listed-company financials
-    usually have not yet consolidated the assets/earnings the market is pricing.
-    PB/PS multiples are meaningless in that regime, so relative valuation is
-    flagged instead of returning an artificially low price.
+    A genuine shell usually has not consolidated the injected assets yet, so
+    its per-share book value and revenue are tiny in *absolute* terms. Merely
+    having a high PB/PS is not enough: profitable semiconductor equipment and
+    chip-design names routinely trade at PB 10-15x and PS 20-40x without any
+    restructuring. We therefore first require negligible absolute fundamentals
+    or negligible earnings before looking at the PB/PS ratios.
     """
     current_price = _num(metrics.get("current_price"))
     bps = _num(metrics.get("bps"))
     sps_ttm = _num(metrics.get("sps_ttm"))
+    eps_ttm = _num(metrics.get("eps_ttm"))
     growth = _num(metrics.get("forecast_growth"))
     if current_price is None or current_price <= 0:
         return False
     if bps is None or bps <= 0 or sps_ttm is None or sps_ttm <= 0:
         return False
     if growth is not None and growth >= GROWTH_LEADER_THRESHOLD:
+        return False
+    # Absolute shell: book and revenue per share are both near zero.
+    if bps < RESTRUCTURING_MIN_BPS and sps_ttm < RESTRUCTURING_MIN_SPS:
+        return True
+    # Otherwise only flag when earnings are negligible AND PB/PS are extreme.
+    if eps_ttm is not None and eps_ttm > RESTRUCTURING_MAX_EPS:
         return False
     pb_current = current_price / bps
     ps_current = current_price / sps_ttm
@@ -155,6 +173,26 @@ def _weighted_growth(
     return _clamp(value, 0.0, MAX_GROWTH)
 
 
+def _resolve_forward_pe(
+    peers: dict[str, Any],
+    forecast_year: Any,
+) -> float | None:
+    """Return a positive forward PE for the consensus year, else nearest year."""
+    pe_forward = peers.get("pe_forward") or {}
+    if forecast_year is not None:
+        value = _num(pe_forward.get(str(forecast_year)))
+        if value is not None and value > 0:
+            return value
+    for year_key in sorted(
+        pe_forward,
+        key=lambda item: (str(item).isdigit(), int(item) if str(item).isdigit() else 10**9),
+    ):
+        value = _num(pe_forward[year_key])
+        if value is not None and value > 0:
+            return value
+    return None
+
+
 def _growth_leader_relative(
     metrics: dict[str, Any],
     notes: list[str],
@@ -162,12 +200,12 @@ def _growth_leader_relative(
 ) -> dict[str, Any] | None:
     """Relative valuation for high-growth leaders.
 
-    For companies whose consensus growth is at least ``GROWTH_LEADER_THRESHOLD``
-    the comparable-company PB/PS multiples are usually far below the market's
-    own premium. We therefore anchor on the company's own trailing 3-year
-    p50 multiple (uncapped), using PE when its historical percentile is stable
-    and PB otherwise. Peers/industry remain visible as reference data points
-    but do not drive the midpoint.
+    When consensus forward EPS and a comparable-company forward PE are both
+    available, anchor on the market-consistent forward PE plus a conservative
+    PB multiple, and treat the company's own trailing historical p50 as a
+    low-weight calibration with an upper cap (a past bubble can leave the
+    historical p50 far above what the market pays today). When forward data is
+    unavailable, fall back to the previous own-history-p50 anchor.
     """
     historical = metrics.get("historical") or {}
     peers = metrics.get("industry_peers") or {}
@@ -175,57 +213,165 @@ def _growth_leader_relative(
     eps_ttm = _num(metrics.get("eps_ttm"))
     bps = _num(metrics.get("bps"))
     sps_ttm = _num(metrics.get("sps_ttm"))
-
-    notes.append(
-        f"高成长龙头分支：一致预期增速 {growth:.1%} ≥ {GROWTH_LEADER_THRESHOLD:.0%}，"
-        "采用自身近3年历史50分位为主锚，同行/行业仅作参考。"
+    forward_eps = _num(metrics.get("forecast_eps"))
+    forecast_year = metrics.get("forecast_year")
+    current_price = _num(metrics.get("current_price"))
+    forward_pe = _resolve_forward_pe(peers, forecast_year)
+    has_forward = (
+        forward_eps is not None
+        and forward_eps > 0
+        and forward_pe is not None
+        and forward_pe > 0
     )
 
+    if has_forward:
+        notes.append(
+            f"高成长龙头分支：一致预期增速 {growth:.1%} ≥ {GROWTH_LEADER_THRESHOLD:.0%}，"
+            "采用 forward PE 为主锚，并以自身历史分位低权重校准（带上限）。"
+        )
+    else:
+        notes.append(
+            f"高成长龙头分支：一致预期增速 {growth:.1%} ≥ {GROWTH_LEADER_THRESHOLD:.0%}，"
+            "缺少 forward EPS/PE，采用自身近3年历史50分位为主锚，同行/行业仅作参考。"
+        )
+
     estimates: list[tuple[float, float, float, float, dict[str, Any]]] = []
-    for key, base in (("pe_ttm", eps_ttm), ("pb", bps)):
+
+    pb_anchor: float | None = None
+    if has_forward and bps is not None and bps > 0:
+        peer_pb = _num((peers.get("pb") or {}).get("median"))
+        current_pb = (
+            current_price / bps
+            if current_price is not None and current_price > 0
+            else None
+        )
+        candidates = [value for value in (peer_pb, current_pb) if value is not None and value > 0]
+        pb_anchor = min(candidates) if candidates else None
+
+    def add_own_history_anchor(
+        key: str,
+        base: float | None,
+        weight: float,
+        cap_multiple: float | None = None,
+    ) -> None:
         if base is None or base <= 0:
-            continue
+            return
         hist = historical.get(key) or {}
         p50 = _num(hist.get("p50"))
         p25 = _num(hist.get("p25"))
         p75 = _num(hist.get("p75"))
         if p50 is None or p50 <= 0:
-            continue
+            return
         if key == "pe_ttm":
             if p25 is not None and p25 <= 0:
-                notes.append(
-                    "PE 历史分位不可靠（p25≤0），龙头主锚改用 PB 自身历史。"
-                )
-                continue
+                notes.append("PE 历史分位不可靠（p25≤0），龙头主锚改用 PB。")
+                return
         elif key == "pb":
             if p25 is not None and p25 <= 0:
-                continue
+                return
+        multiple = p50
+        if cap_multiple is not None and cap_multiple > 0 and multiple > cap_multiple:
+            label = "PE-TTM" if key == "pe_ttm" else "PB"
+            notes.append(
+                f"{label}自身历史50分位 {multiple:.2f} 超过龙头锚上限 "
+                f"{cap_multiple:.2f}，已按上限参与校准。"
+            )
+            multiple = cap_multiple
+            p25 = None
+            p75 = None
         low_mult = (
-            p25 if p25 is not None and p25 > 0 else p50 * (1.0 - TARGET_BAND)
+            p25 if p25 is not None and p25 > 0 else multiple * (1.0 - TARGET_BAND)
         )
         high_mult = (
-            p75 if p75 is not None and p75 > 0 else p50 * (1.0 + TARGET_BAND)
+            p75 if p75 is not None and p75 > 0 else multiple * (1.0 + TARGET_BAND)
         )
+        low_mult = min(low_mult, multiple)
+        high_mult = max(high_mult, multiple)
         label = "PE-TTM" if key == "pe_ttm" else "PB"
+        name_suffix = "龙头主锚" if weight >= 1.0 else "龙头校准"
+        target_source = (
+            "自身历史50分位(龙头主锚)"
+            if weight >= 1.0
+            else "自身历史50分位(龙头校准)"
+        )
         estimates.append(
             (
-                base * p50,
+                base * multiple,
                 base * low_mult,
                 base * high_mult,
-                1.0,
+                weight,
                 {
                     "metric": f"{key}_hist_leader",
-                    "name": f"{label}(自身历史主锚)",
+                    "name": f"{label}(自身历史{name_suffix})",
                     "base": _round(base),
-                    "target_multiple": _round(p50),
-                    "target_source": "自身历史50分位(龙头主锚)",
-                    "implied_price": _round(base * p50),
+                    "target_multiple": _round(multiple),
+                    "target_source": target_source,
+                    "implied_price": _round(base * multiple),
                     "implied_low": _round(base * low_mult),
                     "implied_high": _round(base * high_mult),
-                    "weight": 1.0,
+                    "weight": weight,
                 },
             ),
         )
+
+    if has_forward:
+        if forward_eps is not None and forward_pe is not None and forward_pe > 0:
+            fwd_implied = forward_eps * forward_pe
+            estimates.append(
+                (
+                    fwd_implied,
+                    fwd_implied * (1.0 - TARGET_BAND),
+                    fwd_implied * (1.0 + TARGET_BAND),
+                    1.0,
+                    {
+                        "metric": "pe_ttm_fwd_leader",
+                        "name": "PE(forward 龙头主锚)",
+                        "base": _round(forward_eps),
+                        "target_multiple": _round(forward_pe),
+                        "target_source": "类似公司中位数(forward PE)",
+                        "implied_price": _round(fwd_implied),
+                        "implied_low": _round(fwd_implied * (1.0 - TARGET_BAND)),
+                        "implied_high": _round(fwd_implied * (1.0 + TARGET_BAND)),
+                        "weight": 1.0,
+                    },
+                ),
+            )
+        if bps is not None and bps > 0 and pb_anchor is not None:
+            pb_implied = bps * pb_anchor
+            estimates.append(
+                (
+                    pb_implied,
+                    pb_implied * (1.0 - TARGET_BAND),
+                    pb_implied * (1.0 + TARGET_BAND),
+                    1.0,
+                    {
+                        "metric": "pb_peer_leader",
+                        "name": "PB(龙头主锚)",
+                        "base": _round(bps),
+                        "target_multiple": _round(pb_anchor),
+                        "target_source": "类似公司中位数/当前PB(取低)",
+                        "implied_price": _round(pb_implied),
+                        "implied_low": _round(pb_implied * (1.0 - TARGET_BAND)),
+                        "implied_high": _round(pb_implied * (1.0 + TARGET_BAND)),
+                        "weight": 1.0,
+                    },
+                ),
+            )
+        add_own_history_anchor(
+            "pe_ttm",
+            eps_ttm,
+            LEADER_HISTORY_WEIGHT,
+            forward_pe * LEADER_HISTORY_CAP_FACTOR,
+        )
+        add_own_history_anchor(
+            "pb",
+            bps,
+            LEADER_HISTORY_WEIGHT,
+            pb_anchor * LEADER_HISTORY_CAP_FACTOR if pb_anchor else None,
+        )
+    else:
+        add_own_history_anchor("pe_ttm", eps_ttm, 1.0)
+        add_own_history_anchor("pb", bps, 1.0)
 
     if not estimates:
         return None
@@ -265,8 +411,14 @@ def _growth_leader_relative(
                 }
             )
 
-    mids = [estimate[0] for estimate in estimates]
-    mid = float(statistics.median(mids))
+    if has_forward:
+        mid = _weighted_trimmed_mean(
+            [(estimate[0], estimate[3]) for estimate in estimates]
+        )
+        basis = "forward PE + PB(高成长龙头)"
+    else:
+        mid = float(statistics.median([estimate[0] for estimate in estimates]))
+        basis = "自身历史50分位(高成长龙头)"
     low = min(estimate[1] for estimate in estimates)
     high = max(estimate[2] for estimate in estimates)
 
@@ -293,7 +445,7 @@ def _growth_leader_relative(
         "high": _round(high),
         "detail": [estimate[4] for estimate in estimates] + reference_details,
         "notes": notes,
-        "basis": "自身历史50分位(高成长龙头)",
+        "basis": basis,
         "peer_names": peer_names,
         "peer_count": len(peer_names) if peer_names else None,
     }
@@ -328,6 +480,16 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
     if loss_making:
         notes.append(
             "TTM 每股收益为负，PE 口径不可用；相对估值以自身历史 PB 为主锚，同行 PB/PS 仅作参考。"
+        )
+    peer_reason = str(peers.get("reason") or "")
+    peers_low_confidence = (
+        peers.get("source") in ("manual", "llm")
+        and any(keyword in peer_reason for keyword in PEER_MISMATCH_KEYWORDS)
+    )
+    if peers_low_confidence:
+        notes.append(
+            "大模型校验提示可比公司名单与目标公司业务/规模不匹配，"
+            "目标倍数改用自身历史分位为主锚，同行仅作参考。"
         )
     if _restructuring_in_progress(metrics):
         return {
@@ -379,6 +541,67 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
         hist_p50 = _num(hist.get("p50"))
         hist_p25 = _num(hist.get("p25"))
         hist_p75 = _num(hist.get("p75"))
+        pe_history_unusable = (
+            key == "pe_ttm"
+            and hist_p25 is not None
+            and hist_p25 <= 0
+        )
+
+        # Cyclical earnings boom detection: when the company's current PE is a
+        # fraction of both the peer median and its own historical p50, the
+        # market is pricing a cyclical earnings peak (e.g. memory/storage at
+        # the top of the cycle). TTM EPS is unsustainably high, so PE-based
+        # estimates massively overstate value; fall back to PB/PS only.
+        cyclical_boom = False
+        if (
+            key == "pe_ttm"
+            and not loss_making
+            and not cyclical
+        ):
+            current_pe = _num((valuation or {}).get("pe_ttm"))
+            pe_candidates = [
+                multiple
+                for multiple in (peers_median, hist_p50)
+                if multiple is not None and multiple > 0
+            ]
+            if (
+                current_pe is not None
+                and current_pe > 0
+                and pe_candidates
+                and current_pe <= CYCLICAL_BOOM_PE_RATIO * min(pe_candidates)
+            ):
+                cyclical_boom = True
+        if cyclical_boom:
+            notes.append(
+                f"当前PE {current_pe:.2f} 显著低于同行与自身历史中位数"
+                f"（≤ {min(pe_candidates):.2f} × {CYCLICAL_BOOM_PE_RATIO:.0%}），"
+                "疑似周期景气高点盈利，PE 口径不适用，改用 PB/PS。"
+            )
+            continue
+
+        # Peer PS medians are unreliable whenever they diverge from the
+        # company's own PS by a wide margin: for low-margin names (server
+        # assemblers) peers overstate, and for high-revenue cyclical names
+        # (memory modules) peers mix in non-comparable businesses. Drop the
+        # PS leg instead of feeding an unrealistic multiple into the mean.
+        if (
+            key == "ps"
+            and not loss_making
+            and not cyclical
+            and peers_median is not None
+            and peers_median > 0
+        ):
+            current_ps = _num((valuation or {}).get("ps"))
+            if (
+                current_ps is not None
+                and current_ps > 0
+                and peers_median > current_ps * PS_PEER_DIVERGENCE_FACTOR
+            ):
+                notes.append(
+                    f"同行PS中位数 {peers_median:.2f} 与自身当前PS {current_ps:.2f} "
+                    "偏离过大，弃用PS相对估值口径。"
+                )
+                continue
 
         if loss_making:
             if key == "pb" and hist_p50 is not None and hist_p50 > 0:
@@ -444,30 +667,80 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
 
         target = None
         source = ""
-        if industry_median is not None and industry_median > 0:
-            target = industry_median
-            source = "行业整体中位数"
-            if peers_median is not None and peers_median > 0:
-                band_low, band_high = PEER_INDUSTRY_BAND
-                if (
-                    band_low * industry_median
-                    <= peers_median
-                    <= band_high * industry_median
-                ):
-                    target = peers_median
-                    source = peers_source
-                else:
-                    notes.append(
-                        f"同行{peer_key.upper()}中位数 {peers_median:.2f} 与行业整体中位数 "
-                        f"{industry_median:.2f} 偏离过大（超出 "
-                        f"{band_low:.0%}–{band_high:.0%} 区间），改用行业整体+自身历史。"
-                    )
-        elif peers_median is not None and peers_median > 0:
-            target = peers_median
-            source = peers_source
-        elif hist_p50 is not None and hist_p50 > 0:
-            target = hist_p50
-            source = "自身历史50分位"
+        current_multiple = _num((valuation or {}).get(key))
+        validated_peers = peers.get("source") in ("manual", "llm")
+
+        # Premium-leader guard: when the company's own current PB/PS is far
+        # above the peer median, the peer median understates a sustained
+        # premium. Anchor on own historical p50 if available, otherwise drop
+        # the leg so a too-low peer multiple cannot drag the midpoint down.
+        if (
+            key in ("pb", "ps")
+            and not loss_making
+            and not cyclical
+            and peers_median is not None
+            and peers_median > 0
+            and current_multiple is not None
+            and current_multiple > 0
+            and current_multiple > peers_median * PEER_OWN_PREMIUM_FACTOR
+        ):
+            if hist_p50 is not None and hist_p50 > 0 and hist_p50 > peers_median:
+                target = hist_p50
+                source = "自身历史50分位"
+                notes.append(
+                    f"同行{peer_key.upper()}中位数 {peers_median:.2f} 显著低于自身当前"
+                    f"{names[key]} {current_multiple:.2f}，采用自身历史50分位 "
+                    f"{hist_p50:.2f} 作为{names[key]}锚。"
+                )
+            else:
+                notes.append(
+                    f"同行{peer_key.upper()}中位数 {peers_median:.2f} 显著低于自身当前"
+                    f"{names[key]} {current_multiple:.2f} 且缺少自身历史分位，"
+                    f"弃用{names[key]}口径。"
+                )
+                continue
+
+        if target is None:
+            if (
+                peers_low_confidence
+                and not pe_history_unusable
+                and hist_p50 is not None
+                and hist_p50 > 0
+            ):
+                target = hist_p50
+                source = "自身历史50分位"
+            elif industry_median is not None and industry_median > 0:
+                target = industry_median
+                source = "行业整体中位数"
+                if peers_median is not None and peers_median > 0:
+                    band_low, band_high = PEER_INDUSTRY_BAND
+                    too_low = peers_median < band_low * industry_median
+                    too_high = peers_median > band_high * industry_median
+                    # Manually/LLM-validated peers represent a vetted comparable
+                    # set, so a higher multiple is trusted instead of being
+                    # downgraded to the broad industry median. A too-low
+                    # multiple is still discarded (premium-leader case).
+                    if (not too_low and not too_high) or (
+                        validated_peers and not too_low
+                    ):
+                        target = peers_median
+                        source = peers_source
+                    else:
+                        notes.append(
+                            f"同行{peer_key.upper()}中位数 {peers_median:.2f} 与行业整体中位数 "
+                            f"{industry_median:.2f} 偏离过大（超出 "
+                            f"{band_low:.0%}–{band_high:.0%} 区间），改用行业整体+自身历史。"
+                        )
+            elif peers_median is not None and peers_median > 0:
+                target = peers_median
+                source = peers_source
+            elif (
+                hist_p50 is not None
+                and hist_p50 > 0
+                and not pe_history_unusable
+            ):
+                target = hist_p50
+                source = "自身历史50分位"
         if target is None:
             continue
         if key == "pe_ttm":
@@ -508,7 +781,16 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
                 },
             ),
         )
-        if source != "自身历史50分位" and hist_p50 is not None and hist_p50 > 0:
+        if pe_history_unusable:
+            notes.append(
+                "历史PE分位区间含亏损期（p25≤0），PE自身历史锚不参与估值。"
+            )
+        if (
+            source != "自身历史50分位"
+            and hist_p50 is not None
+            and hist_p50 > 0
+            and not pe_history_unusable
+        ):
             cap_multiple = HISTORY_CAP * target
             hist_multiple_low = (
                 hist_p25
@@ -636,7 +918,11 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
     source_counts = Counter(item["target_source"] for item in primary_estimates)
     primary_source = source_counts.most_common(1)[0][0] if source_counts else ""
     if primary_source == "自身历史50分位":
-        if not loss_making:
+        if peers_low_confidence:
+            notes.append(
+                "同行名单经大模型校验与目标公司不匹配，目标倍数采用自身历史分位。"
+            )
+        elif not loss_making:
             notes.append(
                 "可比公司与行业整体数据不可用，目标倍数回退至自身近3年历史50分位。"
             )

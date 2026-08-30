@@ -122,7 +122,7 @@ def test_relative_valuation_manual_peers_label():
 def test_relative_valuation_llm_peers_label():
     metrics = _metrics()
     metrics["industry_peers"]["source"] = "llm"
-    metrics["industry_peers"]["reason"] = "候选与目标业务不匹配，已替换"
+    metrics["industry_peers"]["reason"] = "已替换为更贴合的同类可比公司"
     result = relative_valuation(metrics)
     assert result["basis"] == "大模型建议类似公司中位数"
     pe = next(item for item in result["detail"] if item["metric"] == "pe_ttm")
@@ -142,6 +142,7 @@ def test_relative_valuation_keeps_metric_up_to_four_times_median():
 
 def test_relative_valuation_drops_extreme_metric_with_note():
     metrics = _metrics()
+    metrics["valuation"]["ps"] = 15.0
     metrics["industry_peers"]["ps"] = {"median": 30.0, "mean": 35.0}
     result = relative_valuation(metrics)
     implied = {item["metric"]: item for item in result["detail"]}
@@ -266,8 +267,9 @@ def test_relative_valuation_growth_leader_uses_pb_when_pe_unreliable():
 def test_relative_valuation_marks_restructuring_in_progress():
     metrics = _metrics()
     metrics["current_price"] = 30.0
-    metrics["bps"] = 1.0
-    metrics["sps_ttm"] = 1.0
+    metrics["eps_ttm"] = 0.2
+    metrics["bps"] = 0.8
+    metrics["sps_ttm"] = 0.7
     metrics["forecast_growth"] = 0.05
     result = relative_valuation(metrics)
     assert result["available"] is False
@@ -275,11 +277,145 @@ def test_relative_valuation_marks_restructuring_in_progress():
     assert any("重组" in note for note in result["notes"])
 
 
+def test_relative_valuation_does_not_flag_profitable_high_multiple_tech():
+    metrics = _metrics(
+        current_price=367.0,
+        eps_ttm=4.4,
+        bps=31.36,
+        sps_ttm=14.74,
+        forecast_growth=0.03,
+    )
+    result = relative_valuation(metrics)
+    assert result["available"] is True
+    assert not result.get("restructuring_in_progress")
+
+
+def test_relative_valuation_drops_ps_for_low_margin_low_ps_company():
+    metrics = _metrics()
+    metrics["valuation"]["ps"] = 0.74
+    metrics["sps_ttm"] = 115.0
+    metrics["industry_peers"]["ps"] = {"median": 2.0, "mean": 3.0}
+    result = relative_valuation(metrics)
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert "ps" not in detail
+    assert any("弃用PS" in note for note in result["notes"])
+
+
+def test_relative_valuation_drops_ps_when_peer_diverges_without_low_ps():
+    metrics = _metrics()
+    metrics["valuation"]["ps"] = 4.42
+    metrics["sps_ttm"] = 85.32
+    metrics["industry_peers"]["ps"] = {"median": 11.1, "mean": 11.31}
+    result = relative_valuation(metrics)
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert "ps" not in detail
+    assert any("弃用PS" in note for note in result["notes"])
+
+
+def test_relative_valuation_drops_pe_on_cyclical_earnings_boom():
+    metrics = _metrics(
+        current_price=376.88,
+        eps_ttm=27.89,
+        bps=43.25,
+        sps_ttm=85.32,
+        forecast_growth=-0.05,
+    )
+    metrics["valuation"].update({"pe_ttm": 13.51, "pb": 8.71, "ps": 4.42})
+    metrics["industry_peers"]["pe"] = {"median": 56.65, "mean": 54.31}
+    metrics["industry_peers"]["pb"] = {"median": 8.57, "mean": 9.75}
+    metrics["industry_peers"]["ps"] = {"median": 11.1, "mean": 11.31}
+    metrics["historical"]["pe_ttm"] = {
+        "p25": -480.39,
+        "p50": 59.63,
+        "p75": 110.33,
+    }
+    metrics["historical"]["pb"] = {"p25": 5.42, "p50": 6.67, "p75": 15.9}
+    result = relative_valuation(metrics)
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert "pe_ttm" not in detail
+    assert "ps" not in detail
+    assert any("周期" in note for note in result["notes"])
+    # PB peer (43.25 * 8.57) + PB own-history blend (43.25 * 6.67, w0.8)
+    assert result["price"] == pytest.approx(334.2, abs=0.1)
+
+
+def test_relative_valuation_skips_pe_history_when_loss_periods():
+    metrics = _metrics()
+    metrics["valuation"]["pe_ttm"] = 60.0
+    metrics["industry_peers"]["pe"] = {"median": 56.65, "mean": 54.31}
+    metrics["historical"]["pe_ttm"] = {
+        "p25": -480.39,
+        "p50": 59.63,
+        "p75": 110.33,
+    }
+    result = relative_valuation(metrics)
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert "pe_ttm" in detail
+    assert "pe_ttm_hist" not in detail
+    assert any("亏损期" in note for note in result["notes"])
+
+
+def test_relative_valuation_uses_own_history_when_peers_flagged_mismatched():
+    metrics = _metrics()
+    metrics["industry_peers"]["source"] = "llm"
+    metrics["industry_peers"]["reason"] = (
+        "候选公司与目标公司业务和规模不匹配；应替换为服务器可比公司。"
+    )
+    result = relative_valuation(metrics)
+    assert result["basis"] == "自身历史50分位"
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert detail["pe_ttm"]["target_source"] == "自身历史50分位"
+    assert detail["pb"]["target_source"] == "自身历史50分位"
+    assert any("自身历史分位为主锚" in note for note in result["notes"])
+
+
+def test_relative_valuation_prefers_own_history_when_peer_pb_ps_understate():
+    metrics = _metrics()
+    metrics["eps_ttm"] = 2.52
+    metrics["bps"] = 17.63
+    metrics["sps_ttm"] = 5.05
+    metrics["valuation"].update({"pe_ttm": 84.58, "pb": 12.08, "ps": 42.2})
+    metrics["industry_peers"]["source"] = "llm"
+    metrics["industry_peers"]["pe"] = {"median": 36.79, "mean": 58.37}
+    metrics["industry_peers"]["pb"] = {"median": 5.14, "mean": 6.43}
+    metrics["industry_peers"]["ps"] = {"median": 13.33, "mean": 12.05}
+    metrics["industry_bench"]["pe"] = {"median": 82.32, "mean": 172.19}
+    metrics["historical"]["pe_ttm"] = {"p25": 61.85, "p50": 68.44, "p75": 85.73}
+    metrics["historical"]["pb"] = {"p25": 7.63, "p50": 10.16, "p75": 13.18}
+    result = relative_valuation(metrics)
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert detail["pb"]["target_multiple"] == 10.16
+    assert detail["pb"]["target_source"] == "自身历史50分位"
+    assert "ps" not in detail
+    assert any("显著低于" in note for note in result["notes"])
+
+
+def test_relative_valuation_keeps_validated_peers_above_industry_band():
+    metrics = _metrics()
+    metrics["eps_ttm"] = 4.42
+    metrics["bps"] = 31.36
+    metrics["sps_ttm"] = 14.74
+    metrics["valuation"].update({"pe_ttm": 83.09, "pb": 11.7, "ps": 24.9})
+    metrics["industry_peers"]["source"] = "llm"
+    metrics["industry_peers"]["reason"] = "已替换为更贴合的可比公司"
+    metrics["industry_peers"]["pe"] = {"median": 113.26, "mean": 347.05}
+    metrics["industry_peers"]["pb"] = {"median": 11.13, "mean": 11.31}
+    metrics["industry_peers"]["ps"] = {"median": 17.04, "mean": 17.66}
+    metrics["industry_bench"]["pe"] = {"median": 51.26, "mean": 111.65}
+    metrics["historical"]["pe_ttm"] = {"p25": 73.15, "p50": 86.09, "p75": 99.11}
+    metrics["historical"]["pb"] = {"p25": 6.09, "p50": 7.14, "p75": 9.57}
+    result = relative_valuation(metrics)
+    pe = next(item for item in result["detail"] if item["metric"] == "pe_ttm")
+    assert pe["target_multiple"] == 113.26
+    assert pe["target_source"] == "大模型建议类似公司中位数"
+
+
 def test_estimate_fair_value_restructuring_returns_placeholder():
     metrics = _metrics(
         current_price=30.0,
-        bps=1.0,
-        sps_ttm=1.0,
+        eps_ttm=0.2,
+        bps=0.8,
+        sps_ttm=0.7,
         forecast_growth=0.05,
         fcf=None,
         dps=None,
@@ -289,6 +425,41 @@ def test_estimate_fair_value_restructuring_returns_placeholder():
     assert result["fair_value_range"]["mid"] is None
     assert result["available_methods"] == []
     assert any("重组" in item["reason"] for item in result["excluded_methods"])
+
+
+def test_relative_valuation_growth_leader_uses_forward_pe_primary():
+    metrics = _metrics(
+        current_price=241.6,
+        eps_ttm=5.11,
+        bps=38.57,
+        sps_ttm=22.27,
+        forecast_growth=0.96,
+        forecast_eps=10.03,
+        forecast_year=2026,
+    )
+    metrics["industry_peers"]["pe_forward"] = {
+        "2025": 34.3,
+        "2026": 18.43,
+        "2027": 12.02,
+    }
+    metrics["industry_peers"]["pb"] = {"median": 7.78, "mean": 8.34}
+    metrics["historical"]["pe_ttm"] = {
+        "p25": 48.03,
+        "p50": 60.38,
+        "p75": 70.88,
+    }
+    metrics["historical"]["pb"] = {
+        "p25": 5.93,
+        "p50": 13.94,
+        "p75": 17.14,
+    }
+    result = relative_valuation(metrics)
+    assert result["basis"] == "forward PE + PB(高成长龙头)"
+    assert result["price"] == pytest.approx(213.23, abs=0.1)
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert detail["pe_ttm_fwd_leader"]["target_multiple"] == 18.43
+    assert detail["pb_peer_leader"]["target_multiple"] == pytest.approx(6.26, abs=0.01)
+    assert any("forward PE" in note for note in result["notes"])
 
 
 def test_relative_valuation_unavailable_without_multiples():

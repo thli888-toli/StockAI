@@ -308,6 +308,81 @@ def test_watchlist_store_roundtrip_and_delete(tmp_path):
     assert store.delete("default", "600519") is False
 
 
+def test_watchlist_tags_roundtrip_and_preserved_on_refresh(tmp_path):
+    store = WatchlistStore(tmp_path / "watchlist.db")
+    store.upsert("default", "600519", company_name="贵州茅台", tags=["白酒", "消费"])
+    item = store.get("default", "600519")
+    assert item is not None
+    assert item["tags"] == ["白酒", "消费"]
+    # Refresh-style upsert without tags must keep existing tags.
+    store.upsert("default", "600519", status="completed")
+    assert store.get("default", "600519")["tags"] == ["白酒", "消费"]
+    # Replacing tags works and duplicates are normalized.
+    updated = store.update_tags("default", "600519", ["核心资产", "核心资产", " 白酒 "])
+    assert updated["tags"] == ["核心资产", "白酒"]
+    assert store.update_tags("default", "600519", [])["tags"] == []
+
+
+def test_watchlist_migrates_adds_tags_column(tmp_path):
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE watchlist (
+            user_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            company_name TEXT NOT NULL DEFAULT '',
+            industry TEXT NOT NULL DEFAULT '',
+            run_id TEXT,
+            status TEXT NOT NULL DEFAULT 'running',
+            error TEXT,
+            outputs TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(user_id, symbol)
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO watchlist(user_id, symbol, company_name, created_at, updated_at) "
+        "VALUES('default', '600519', '贵州茅台', 'now', 'now')"
+    )
+    conn.commit()
+    conn.close()
+    store = WatchlistStore(db_path)
+    item = store.get("default", "600519")
+    assert item is not None
+    assert item["tags"] == []
+    store.update_tags("default", "600519", ["白酒"])
+    assert store.get("default", "600519")["tags"] == ["白酒"]
+
+
+def test_watchlist_tags_api_roundtrip(monkeypatch, tmp_path):
+    def fake_post(url, json=None, timeout=None):
+        return FakeResponse(200, _run_payload("r1", "running", json["query"]))
+
+    monkeypatch.setattr(stock_portal_app.httpx, "post", fake_post)
+    app = _make_app(tmp_path)
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        client.post("/api/watchlist", json={"query": "600519"}, headers=headers)
+        updated = client.put(
+            "/api/watchlist/600519/tags",
+            json={"tags": ["半导体", "核心资产"]},
+            headers=headers,
+        )
+        assert updated.status_code == 200
+        assert updated.json()["tags"] == ["半导体", "核心资产"]
+        listed = client.get("/api/watchlist", headers=headers).json()
+        assert listed[0]["tags"] == ["半导体", "核心资产"]
+        missing = client.put(
+            "/api/watchlist/000001/tags",
+            json={"tags": ["x"]},
+            headers=headers,
+        )
+        assert missing.status_code == 404
+
+
 def test_watchlist_migrates_legacy_rows_to_default_user(tmp_path):
     db_path = tmp_path / "legacy.db"
     conn = sqlite3.connect(db_path)

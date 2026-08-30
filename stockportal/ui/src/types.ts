@@ -15,6 +15,7 @@ export type WatchlistItem = {
   symbol: string;
   company_name: string;
   industry: string;
+  tags: string[];
   run_id: string | null;
   status: RunStatus;
   error: string | null;

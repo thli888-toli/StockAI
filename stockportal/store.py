@@ -45,6 +45,7 @@ class WatchlistStore:
                     symbol TEXT NOT NULL,
                     company_name TEXT NOT NULL DEFAULT '',
                     industry TEXT NOT NULL DEFAULT '',
+                    tags TEXT NOT NULL DEFAULT '[]',
                     run_id TEXT,
                     status TEXT NOT NULL DEFAULT 'running',
                     error TEXT,
@@ -76,6 +77,7 @@ class WatchlistStore:
                         symbol TEXT NOT NULL,
                         company_name TEXT NOT NULL DEFAULT '',
                         industry TEXT NOT NULL DEFAULT '',
+                        tags TEXT NOT NULL DEFAULT '[]',
                         run_id TEXT,
                         status TEXT NOT NULL DEFAULT 'running',
                         error TEXT,
@@ -99,6 +101,14 @@ class WatchlistStore:
                     """
                 )
                 self.conn.execute("DROP TABLE watchlist_old")
+            columns = {
+                row["name"]
+                for row in self.conn.execute("PRAGMA table_info(watchlist)")
+            }
+            if "tags" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE watchlist ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'"
+                )
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO users(id, openid, nickname, avatar, created_at)
@@ -111,7 +121,45 @@ class WatchlistStore:
     def _item_from_row(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         item["outputs"] = json.loads(item.get("outputs") or "{}")
+        try:
+            item["tags"] = json.loads(item.get("tags") or "[]")
+        except (TypeError, ValueError):
+            item["tags"] = []
         return item
+
+    @staticmethod
+    def _normalize_tags(tags: list[str] | str | None) -> list[str]:
+        """Return a unique, trimmed list of non-empty tags."""
+        if tags is None:
+            return []
+        if isinstance(tags, str):
+            raw = [part.strip() for part in tags.replace("，", ",").replace("、", ",").split(",")]
+        else:
+            raw = [str(part).strip() for part in tags]
+        seen: list[str] = []
+        for tag in raw:
+            if tag and tag not in seen:
+                seen.append(tag)
+        return seen
+
+    @staticmethod
+    def _tags_json(tags: list[str] | str | None) -> str:
+        return json.dumps(WatchlistStore._normalize_tags(tags), ensure_ascii=False)
+
+    def update_tags(
+        self,
+        user_id: str,
+        symbol: str,
+        tags: list[str] | str | None,
+    ) -> dict[str, Any] | None:
+        """Replace the tag list of one watchlist row and return the item."""
+        normalized = self._normalize_tags(tags)
+        with self.lock, self.conn:
+            self.conn.execute(
+                "UPDATE watchlist SET tags=?, updated_at=? WHERE user_id=? AND symbol=?",
+                (json.dumps(normalized, ensure_ascii=False), _now(), user_id, symbol),
+            )
+        return self.get(user_id, symbol)
 
     def upsert(
         self,
@@ -124,17 +172,22 @@ class WatchlistStore:
         outputs: dict[str, Any] | None = None,
         company_name: str = "",
         industry: str = "",
+        tags: list[str] | str | None = None,
     ) -> dict[str, Any]:
         outputs_json = json.dumps(outputs or {}, default=str)
+        if tags is None:
+            existing = self.get(user_id, symbol)
+            tags = (existing or {}).get("tags", [])
+        tags_json = self._tags_json(tags)
         now = _now()
         with self.lock, self.conn:
             self.conn.execute(
                 """
                 INSERT INTO watchlist(
-                    user_id, symbol, company_name, industry, run_id, status, error, outputs,
-                    created_at, updated_at
+                    user_id, symbol, company_name, industry, tags, run_id, status, error,
+                    outputs, created_at, updated_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, symbol) DO UPDATE SET
                     company_name=excluded.company_name,
                     industry=excluded.industry,
@@ -142,6 +195,7 @@ class WatchlistStore:
                     status=excluded.status,
                     error=excluded.error,
                     outputs=excluded.outputs,
+                    tags=excluded.tags,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -149,6 +203,7 @@ class WatchlistStore:
                     symbol,
                     company_name,
                     industry,
+                    tags_json,
                     run_id,
                     status,
                     error,
@@ -162,6 +217,7 @@ class WatchlistStore:
             "symbol": symbol,
             "company_name": company_name,
             "industry": industry,
+            "tags": self._normalize_tags(tags),
             "run_id": run_id,
             "status": status,
             "error": error,

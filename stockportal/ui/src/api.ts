@@ -61,6 +61,11 @@ export const api = {
     request<{ deleted: boolean }>(`/api/watchlist/${encodeURIComponent(symbol)}`, {
       method: "DELETE"
     }),
+  updateTags: (symbol: string, tags: string[]) =>
+    request<WatchlistItem>(`/api/watchlist/${encodeURIComponent(symbol)}/tags`, {
+      method: "PUT",
+      body: JSON.stringify({ tags })
+    }),
   saveChart: (symbol: string, period: string) =>
     request<{ id: number; period: string; label: string; saved_at: string }>(
       `/api/watchlist/${encodeURIComponent(symbol)}/chart/save`,
