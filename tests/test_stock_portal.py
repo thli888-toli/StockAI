@@ -57,6 +57,38 @@ def _auth_headers(client, nickname: str = "test_user") -> dict:
     return {"Authorization": f"Bearer {response.json()['token']}"}
 
 
+def test_fibonacci_levels_bracket_price_below_range():
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=8, freq="D"),
+            "open": [50.0] * 8,
+            "high": [55.0, 56.0, 54.0, 53.0, 52.0, 51.0, 50.0, 49.0],
+            "low": [48.0, 49.0, 48.0, 47.0, 46.0, 45.0, 44.0, 43.0],
+            "close": [52.0] * 7 + [40.0],
+            "volume": [1000] * 8,
+        }
+    )
+    support, resistance = stock_portal_app._fibonacci_levels(frame)
+    assert support < resistance
+    assert support < 40.0 < resistance
+
+
+def test_fibonacci_levels_bracket_price_above_range():
+    frame = pd.DataFrame(
+        {
+            "date": pd.date_range("2026-01-01", periods=8, freq="D"),
+            "open": [20.0] * 8,
+            "high": [26.0, 25.0, 24.0, 23.0, 22.0, 21.0, 20.0, 30.0],
+            "low": [19.0, 18.0, 17.0, 16.0, 15.0, 14.0, 13.0, 29.0],
+            "close": [22.0] * 7 + [32.0],
+            "volume": [1000] * 8,
+        }
+    )
+    support, resistance = stock_portal_app._fibonacci_levels(frame)
+    assert support < resistance
+    assert support < 32.0 < resistance
+
+
 def test_stock_portal_create_run_proxies_orchestrator(monkeypatch, tmp_path):
     captured = {}
 

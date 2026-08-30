@@ -86,6 +86,17 @@ export default function KLineChartView({ payload }: { payload: ChartPayload }) {
         close: candle.close,
       }))
     );
+    const lastCandle = payload.candles[payload.candles.length - 1];
+    if (lastCandle) {
+      candleSeries.createPriceLine({
+        price: lastCandle.close,
+        color: "#000000",
+        lineWidth: 2,
+        lineStyle: 2,
+        axisLabelVisible: false,
+        title: "当前价",
+      });
+    }
     candleSeries.createPriceLine({
       price: payload.levels[payload.period].support,
       color: "#2f9e44",
@@ -118,7 +129,6 @@ export default function KLineChartView({ payload }: { payload: ChartPayload }) {
       });
     }
 
-    const lastCandle = payload.candles[payload.candles.length - 1];
     const legendItems: { label: string; value: string; color: string }[] = [];
     if (lastCandle) {
       legendItems.push({

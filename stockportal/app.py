@@ -112,15 +112,34 @@ def _fibonacci_levels(
     if swing_high <= swing_low:
         swing_high = swing_low + 1.0
 
+    last_close = float(frame["close"].iloc[-1])
+    # Keep the swing range bracketing the latest close. When the price breaks
+    # out of the recent structure (above the swing high or below the swing
+    # low), the naive support/resistance fallbacks both collapse onto the
+    # nearest level and become equal. Extend the range on the breakout side
+    # so support < resistance and the price sits between them.
+    if last_close < swing_low:
+        swing_low = last_close - (swing_high - last_close) * 0.5
+    elif last_close > swing_high:
+        swing_high = last_close + (last_close - swing_low) * 0.5
+
     price_range = swing_high - swing_low
     ratios = (0.0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
     levels = [swing_low + price_range * ratio for ratio in ratios]
 
-    last_close = float(frame["close"].iloc[-1])
     supports = [value for value in levels if value <= last_close]
     resistances = [value for value in levels if value >= last_close]
     support = max(supports) if supports else min(levels)
     resistance = min(resistances) if resistances else max(levels)
+    if support >= resistance:
+        # Degenerate guard (e.g. the close sits exactly on a level): widen by
+        # moving one of the two to the adjacent level.
+        above = [value for value in levels if value > support]
+        below = [value for value in levels if value < resistance]
+        if above:
+            resistance = above[0]
+        elif below:
+            support = below[-1]
     return round(support, 4), round(resistance, 4)
 
 
