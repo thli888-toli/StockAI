@@ -264,6 +264,78 @@ def test_relative_valuation_growth_leader_uses_pb_when_pe_unreliable():
     assert any("PE 历史分位不可靠" in note for note in result["notes"])
 
 
+def test_relative_valuation_growth_leader_median_uses_primary_anchors_only():
+    metrics = _metrics(forecast_growth=0.35)
+    metrics["model_targets"] = {
+        "available": True,
+        "confidence": 0.9,
+        "model_version": "1.0",
+        "pe": 5.0,  # implies 2 * 5 = 10
+        "pb": 1.0,  # implies 10 * 1 = 10
+        "ps": 1.0,  # implies 5 * 1 = 5
+    }
+    result = relative_valuation(metrics)
+    assert result["basis"] == "自身历史50分位(高成长龙头)"
+    # Primary anchors: PE 2*18=36, PB 10*2.5=25 -> median 30.5.
+    # Low-weight model anchors (10/10/5) must not drag the median down.
+    assert result["price"] == pytest.approx(30.5, abs=0.01)
+    assert result["low"] == pytest.approx(20.0, abs=0.01)
+    assert result["high"] == pytest.approx(44.0, abs=0.01)
+
+
+def test_leader_primary_min_weight_controls_reference_anchor_participation():
+    metrics = _metrics(forecast_growth=0.35)
+    metrics["model_targets"] = {
+        "available": True,
+        "confidence": 0.9,
+        "model_version": "1.0",
+        "pe": 5.0,
+        "pb": 1.0,
+        "ps": 1.0,
+    }
+    # Threshold 1.0 (default): only primary anchors -> median(36, 25) = 30.5
+    strict = relative_valuation(metrics)
+    assert strict["price"] == pytest.approx(30.5, abs=0.01)
+    # Threshold 0.5: model anchors (10/10/5) re-enter the median -> 10
+    loose = relative_valuation(
+        metrics, cfg={"leader_primary_min_weight": 0.5}
+    )
+    assert loose["price"] == pytest.approx(10.0, abs=0.01)
+
+
+def test_target_percentile_selects_leader_history_anchor():
+    metrics = _metrics(forecast_growth=0.35)
+    # fixture history: pe p25=14/p50=18/p75=22, pb p25=2/p50=2.5/p75=3
+    p75 = relative_valuation(
+        metrics, cfg={"target_percentile": 0.75}
+    )
+    # PE 2*22=44, PB 10*3=30 -> median 37
+    assert p75["price"] == pytest.approx(37.0, abs=0.01)
+    assert any("75分位" in item["target_source"] for item in p75["detail"])
+    p25 = relative_valuation(
+        metrics, cfg={"target_percentile": 0.25}
+    )
+    # PE 2*14=28, PB 10*2=20 -> median 24
+    assert p25["price"] == pytest.approx(24.0, abs=0.01)
+    # Default 0.5 keeps the historical p50 anchor (median 30.5)
+    default = relative_valuation(metrics)
+    assert default["price"] == pytest.approx(30.5, abs=0.01)
+
+
+def test_leader_branch_drops_pe_anchor_on_cyclical_boom():
+    metrics = _metrics(
+        forecast_growth=0.35,
+    )
+    # Current PE far below the historical median (cyclical earnings peak).
+    metrics["valuation"]["pe_ttm"] = 5.0
+    result = relative_valuation(metrics)
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert "pe_ttm_hist_leader" not in detail
+    assert detail["pb_hist_leader"]["target_multiple"] == 2.5
+    assert result["price"] == pytest.approx(25.0, abs=0.01)
+    assert any("周期景气高点" in note for note in result["notes"])
+
+
 def test_relative_valuation_marks_restructuring_in_progress():
     metrics = _metrics()
     metrics["current_price"] = 30.0
@@ -337,6 +409,196 @@ def test_relative_valuation_drops_pe_on_cyclical_earnings_boom():
     assert any("周期" in note for note in result["notes"])
     # PB peer (43.25 * 8.57) + PB own-history blend (43.25 * 6.67, w0.8)
     assert result["price"] == pytest.approx(334.2, abs=0.1)
+
+
+def _model_targets() -> dict:
+    return {
+        "available": True,
+        "confidence": 0.9,
+        "model_version": "1.0",
+        "pe": 14.0,
+        "pb": 2.0,
+        "ps": 2.5,
+    }
+
+
+def test_relative_valuation_blends_model_anchor():
+    metrics = _metrics()
+    metrics["model_targets"] = _model_targets()
+    result = relative_valuation(metrics)
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert "pe_ttm_model" in detail
+    assert "pb_model" in detail
+    assert "ps_model" in detail
+    assert detail["pe_ttm_model"]["target_source"].startswith("本地LightGBM模型")
+    assert detail["pe_ttm_model"]["weight"] == 0.5
+    assert any("本地LightGBM模型" in note for note in result["notes"])
+
+
+def test_relative_valuation_model_anchor_weight_from_cfg():
+    metrics = _metrics()
+    metrics["model_targets"] = _model_targets()
+    result = relative_valuation(metrics, cfg={"model_anchor_weight": 0.2})
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert detail["pe_ttm_model"]["weight"] == 0.2
+
+
+def test_relative_valuation_ignores_low_confidence_model():
+    metrics = _metrics()
+    metrics["model_targets"] = dict(_model_targets(), confidence=0.3)
+    result = relative_valuation(metrics)
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert "pe_ttm_model" not in detail
+
+
+def test_relative_valuation_uses_model_as_last_fallback():
+    metrics = _metrics(
+        current_price=20.0,
+        eps_ttm=2.0,
+        bps=10.0,
+        sps_ttm=5.0,
+    )
+    metrics["industry_peers"] = {}
+    metrics["industry_bench"] = {}
+    metrics["historical"] = {}
+    metrics["model_targets"] = _model_targets()
+    result = relative_valuation(metrics)
+    assert result["available"] is True
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert detail["pe_ttm"]["target_source"] == "本地LightGBM模型"
+    assert any("回退至本地模型" in note for note in result["notes"])
+
+
+def test_model_disabled_via_cfg():
+    metrics = _metrics()
+    metrics["model_targets"] = _model_targets()
+    result = relative_valuation(metrics, cfg={"model_enabled": False})
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert "pe_ttm_model" not in detail
+
+
+def test_cfg_verdict_band_changes_verdict():
+    metrics = _metrics(current_price=24.0)
+    base = estimate_fair_value(metrics)
+    assert base["verdict"]["label"] == "低估"
+    wider = estimate_fair_value(metrics, cfg={"verdict_band": 0.5})
+    assert wider["verdict"]["label"] == "合理"
+
+
+def test_cfg_discount_rate_changes_dcf_price():
+    metrics = _metrics()
+    base = dcf_valuation(metrics)
+    lower = dcf_valuation(metrics, cfg={"discount_rate": 0.08})
+    assert lower["price"] > base["price"]
+    assert lower["discount_rate"] == 0.08
+
+
+def test_estimate_fair_value_assumptions_report_config_source():
+    result = estimate_fair_value(
+        _metrics(),
+        cfg={"discount_rate": 0.09},
+        config_source="600519.json",
+        config_overrides=["discount_rate"],
+    )
+    assumptions = result["assumptions"]
+    assert assumptions["config_source"] == "600519.json"
+    assert assumptions["config_overrides"] == ["discount_rate"]
+    assert assumptions["discount_rate"] == 0.09
+
+
+def test_manual_fair_value_override_returns_range_and_verdict():
+    metrics = _metrics(current_price=20.0)
+    result = estimate_fair_value(
+        metrics,
+        cfg={
+            "manual_fair_value": {
+                "low": 15.0,
+                "mid": 18.0,
+                "high": 21.0,
+                "note": "待资产并表确认",
+            }
+        },
+        config_source="000506.json",
+        config_overrides=["manual_fair_value"],
+    )
+    assert result["manual"] is True
+    assert result["manual_note"] == "待资产并表确认"
+    assert result["fair_value_range"] == {"low": 15.0, "mid": 18.0, "high": 21.0}
+    assert result["verdict"]["label"] == "高估"  # (20 - 18) / 18 = +11.1% > 10%
+    assert result["assumptions"]["manual"] is True
+    assert result["assumptions"]["config_source"] == "000506.json"
+
+
+def test_manual_fair_value_overrides_restructuring_flag():
+    # Thin per-share fundamentals that normally trigger the restructuring flag.
+    metrics = _metrics(
+        current_price=21.43,
+        eps_ttm=0.367,
+        bps=0.97,
+        sps_ttm=0.75,
+        forecast_growth=-0.06,
+        fcf=-1.0e8,
+        dps=0.01,
+    )
+    flagged = estimate_fair_value(metrics)
+    assert flagged["verdict"]["label"] == "重组/注入中"
+    manual = estimate_fair_value(
+        metrics,
+        cfg={
+            "manual_fair_value": {
+                "low": 15.0,
+                "mid": 18.0,
+                "high": 21.0,
+            }
+        },
+    )
+    assert manual["manual"] is True
+    assert manual["fair_value_range"]["mid"] == 18.0
+    assert manual["verdict"]["label"] == "高估"  # (21.43 - 18) / 18 = +19%
+
+
+def test_growth_cagr_weight_changes_dcf_growth_blend():
+    metrics = _metrics(
+        revenue_growth_cagr=0.10,
+        forecast_growth=0.20,
+    )
+    cagr_only = dcf_valuation(metrics, cfg={"growth_cagr_weight": 1.0})
+    forecast_only = dcf_valuation(metrics, cfg={"growth_cagr_weight": 0.0})
+    assert cagr_only["growth"] == pytest.approx(0.10, abs=0.0001)
+    assert forecast_only["growth"] == pytest.approx(0.20, abs=0.0001)
+    assert forecast_only["price"] > cagr_only["price"]
+
+
+def test_peg_band_controls_clamp_range():
+    from plugins.stock_fundamental.valuation import _pe_target_adjusted
+
+    notes: list[str] = []
+    default_band = _pe_target_adjusted(
+        34.22, 0.174, notes, cfg={"peg_factor": 1.5}
+    )
+    assert default_band == pytest.approx(26.1, abs=0.01)
+    tight_notes: list[str] = []
+    tight_band = _pe_target_adjusted(
+        34.22, 0.174, tight_notes, cfg={"peg_factor": 1.5, "peg_band": [0.8, 1.2]}
+    )
+    assert tight_band == pytest.approx(34.22 * 0.8, abs=0.01)
+
+
+def test_ddm_growth_cap_changes_gordon_growth():
+    metrics = _metrics(
+        dps=1.0,
+        roe=0.30,
+        payout_ratio=0.5,
+        current_price=20.0,
+    )
+    base = ddm_valuation(metrics, cfg={"discount_rate": 0.20})
+    assert base["growth"] == pytest.approx(0.10, abs=0.0001)
+    higher = ddm_valuation(
+        metrics,
+        cfg={"discount_rate": 0.20, "ddm_growth_cap": 0.15},
+    )
+    assert higher["growth"] == pytest.approx(0.15, abs=0.0001)
+    assert higher["price"] > base["price"]
 
 
 def test_relative_valuation_skips_pe_history_when_loss_periods():

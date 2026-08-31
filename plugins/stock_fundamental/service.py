@@ -233,6 +233,8 @@ def _build_metrics(
         payout_ratio = min(1.0, max(0.0, dividend_ttm / net_profit_ttm))
 
     roe = _fraction(latest_indicator.get("roe"))
+    gross_margin = _fraction(latest_indicator.get("gross_margin"))
+    net_profit_yoy = _fraction(latest_indicator.get("net_profit_yoy"))
     revenue_growth_cagr = _revenue_cagr(income_statement)
     revenue_growth_yoy = None
     if income_statement:
@@ -275,6 +277,8 @@ def _build_metrics(
         "dps": dps,
         "annual_dps": annual_dps,
         "roe": roe,
+        "gross_margin": gross_margin,
+        "net_profit_yoy": net_profit_yoy,
         "payout_ratio": payout_ratio,
         "revenue_growth_cagr": revenue_growth_cagr,
         "revenue_growth_yoy": revenue_growth_yoy,
@@ -430,6 +434,21 @@ def _build_report_section(analysis: dict[str, Any]) -> str:
         f"- 估值水平：PE-TTM {pe_text}，PB {pb_text}，"
         f"PS {_fmt_price(snapshot.get('ps'))}；{pe_bench_label} {industry_text}。"
     )
+    model_targets = metrics.get("model_targets") or {}
+    if model_targets.get("available"):
+        mt_confidence = model_targets.get("confidence")
+        mt_confidence_text = (
+            f"{mt_confidence:.0%}" if mt_confidence is not None else "—"
+        )
+        lines.append(
+            "- 本地模型参考倍数："
+            f"PE {_fmt_price(model_targets.get('pe'))}、"
+            f"PB {_fmt_price(model_targets.get('pb'))}、"
+            f"PS {_fmt_price(model_targets.get('ps'))}"
+            f"（置信度 {mt_confidence_text}，"
+            f"模型 v{model_targets.get('model_version', '—')}"
+            f"，训练报告期 {model_targets.get('report_date') or '—'}）。"
+        )
 
     fair_value = valuation.get("fair_value_range")
     verdict = valuation.get("verdict") or {}
@@ -445,67 +464,76 @@ def _build_report_section(analysis: dict[str, Any]) -> str:
             )
     elif fair_value:
         low, mid, high = fair_value["low"], fair_value["mid"], fair_value["high"]
-        method_names = {"relative": "相对估值", "dcf": "DCF", "ddm": "股息折现"}
-        used_names = [
-            method_names.get(name, name)
-            for name in (valuation.get("available_methods") or [])
-        ]
-        if len(used_names) == 1:
-            label = f"（采用{used_names[0]}）"
-        elif used_names:
-            label = f"（纳入{'、'.join(used_names)}）"
+        manual_flag = bool(valuation.get("manual"))
+        if manual_flag:
+            label = "（人工估值，待并表确认）"
         else:
-            label = ""
+            method_names = {"relative": "相对估值", "dcf": "DCF", "ddm": "股息折现"}
+            used_names = [
+                method_names.get(name, name)
+                for name in (valuation.get("available_methods") or [])
+            ]
+            if len(used_names) == 1:
+                label = f"（采用{used_names[0]}）"
+            elif used_names:
+                label = f"（纳入{'、'.join(used_names)}）"
+            else:
+                label = ""
         lines.append(
             f"- 合理股价估算{label}：区间 {_fmt_price(low)}–{_fmt_price(high)} 元，"
             f"中枢 {_fmt_price(mid)} 元。"
         )
-        per_method = valuation.get("per_method") or {}
-        relative = per_method.get("relative") or {}
-        dcf = per_method.get("dcf") or {}
-        ddm = per_method.get("ddm") or {}
-        if relative.get("available"):
-            basis = str(relative.get("basis") or "历史/行业倍数")
-            peer_names = relative.get("peer_names") or []
-            peer_text = ""
-            if "类似公司" in basis and peer_names:
-                shown = "、".join(peer_names[:10])
-                if len(peer_names) > 10:
-                    shown += "等"
-                peer_text = f"（类似公司：{shown}，共{len(peer_names)}家）"
-            lines.append(
-                f"  - 相对估值：{_fmt_price(relative.get('price'))} 元"
-                f"（目标倍数：{basis}{peer_text}）。"
-            )
-        if dcf.get("available"):
-            lines.append(
-                f"  - DCF：{_fmt_price(dcf.get('price'))} 元"
-                f"（折现率{dcf.get('discount_rate', 0.1):.0%}、永续增速{dcf.get('terminal_growth', 0.02):.0%}、"
-                f"假设增速{_fmt_pct(dcf.get('growth'), 1)}）。"
-            )
-        if ddm.get("available"):
-            lines.append(
-                f"  - 股息折现：{_fmt_price(ddm.get('price'))} 元"
-                f"（假设增速{_fmt_pct(ddm.get('growth'), 1)}）。"
-            )
-        sensitivity = dcf.get("sensitivity") or {}
-        if sensitivity:
-            lines.append(
-                "  - DCF敏感性："
-                + "；".join(f"折现率{rate}→{_fmt_price(price)}元" for rate, price in sensitivity.items())
-                + "。"
-            )
-        for item in valuation.get("excluded_methods") or []:
-            name = method_names.get(item.get("method"), item.get("method", ""))
-            reason = (item.get("reason") or "不适用").rstrip("。")
-            lines.append(f"  - 未纳入：{name}（{reason}）。")
-        for name in ("relative", "dcf", "ddm"):
-            item = per_method.get(name) or {}
-            if not item.get("available"):
-                reason = next(iter(item.get("notes") or []), "不适用").rstrip("。")
+        if manual_flag:
+            note = valuation.get("manual_note") or ""
+            if note:
+                lines.append(f"  - 说明：{note}")
+        else:
+            per_method = valuation.get("per_method") or {}
+            relative = per_method.get("relative") or {}
+            dcf = per_method.get("dcf") or {}
+            ddm = per_method.get("ddm") or {}
+            if relative.get("available"):
+                basis = str(relative.get("basis") or "历史/行业倍数")
+                peer_names = relative.get("peer_names") or []
+                peer_text = ""
+                if "类似公司" in basis and peer_names:
+                    shown = "、".join(peer_names[:10])
+                    if len(peer_names) > 10:
+                        shown += "等"
+                    peer_text = f"（类似公司：{shown}，共{len(peer_names)}家）"
                 lines.append(
-                    f"  - 未纳入：{method_names.get(name, name)}（{reason}）。"
+                    f"  - 相对估值：{_fmt_price(relative.get('price'))} 元"
+                    f"（目标倍数：{basis}{peer_text}）。"
                 )
+            if dcf.get("available"):
+                lines.append(
+                    f"  - DCF：{_fmt_price(dcf.get('price'))} 元"
+                    f"（折现率{dcf.get('discount_rate', 0.1):.0%}、永续增速{dcf.get('terminal_growth', 0.02):.0%}、"
+                    f"假设增速{_fmt_pct(dcf.get('growth'), 1)}）。"
+                )
+            if ddm.get("available"):
+                lines.append(
+                    f"  - 股息折现：{_fmt_price(ddm.get('price'))} 元"
+                    f"（假设增速{_fmt_pct(ddm.get('growth'), 1)}）。"
+                )
+            sensitivity = dcf.get("sensitivity") or {}
+            if sensitivity:
+                lines.append(
+                    "  - DCF敏感性："
+                    + "；".join(f"折现率{rate}→{_fmt_price(price)}元" for rate, price in sensitivity.items())
+                    + "。"
+                )
+            for item in valuation.get("excluded_methods") or []:
+                name = method_names.get(item.get("method"), item.get("method", ""))
+                reason = (item.get("reason") or "不适用").rstrip("。")
+                lines.append(f"  - 未纳入：{name}（{reason}）。")
+            for name in ("relative", "dcf", "ddm"):
+                item = per_method.get(name) or {}
+                if not item.get("available"):
+                    reason = next(iter(item.get("notes") or []), "不适用").rstrip("。")
+                    lines.append(
+                        f"  - 未纳入：{method_names.get(name, name)}（{reason}）。"
+                    )
         lines.append(
             f"- 当前股价 {_fmt_price(metrics.get('current_price'))} 元，"
             f"估值中枢相对现价偏离 {_fmt_pct(verdict.get('margin'), 1)}，"
@@ -551,7 +579,9 @@ async def _llm_report_section(analysis: dict[str, Any]) -> str | None:
     prompt = (
         "只输出一个 Markdown 章节，标题固定为 `## 基本面与估值`。"
         "只允许使用下面提供的数据，不得编造数字；必须包含估值区间、方法、关键假设、"
-        "低估/合理/高估判断与风险提示，末尾必须保留风险提示与免责声明。\n\n"
+        "低估/合理/高估判断与风险提示；若提供本地模型参考倍数，需在关键假设中说明"
+        "模型版本与置信度；若估值标记为人工估值，须注明'人工估值区间（待并表确认）'；"
+        "末尾必须保留风险提示与免责声明。\n\n"
         f"DATA: {json.dumps(payload, ensure_ascii=False, default=str)}"
     )
     try:
@@ -588,6 +618,18 @@ class StockFundamentalHandler:
             raise RuntimeError("核心基本面工具（报表/指标/估值快照）全部失败")
 
         metrics = _build_metrics(symbol, market_data, results)
+        model_targets: dict[str, Any] = {}
+        try:
+            model_targets = await run_tool(
+                "get_model_targets",
+                symbol,
+                market_data,
+                warnings,
+                metrics=metrics,
+            )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"get_model_targets 失败: {exc}")
+        metrics["model_targets"] = model_targets
         valuation: dict[str, Any] = {}
         try:
             valuation = await run_tool(
@@ -614,6 +656,7 @@ class StockFundamentalHandler:
             "historical": results.get("get_historical_valuation_percentile"),
             "industry_comparison": results.get("get_industry_valuation_comparison"),
             "forecast": results.get("get_earnings_forecast"),
+            "model_targets": model_targets,
             "metrics": metrics,
             "valuation": valuation,
             "warnings": warnings,

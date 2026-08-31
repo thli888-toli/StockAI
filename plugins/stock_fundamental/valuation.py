@@ -58,6 +58,79 @@ LEADER_HISTORY_WEIGHT = 0.5
 LEADER_HISTORY_CAP_FACTOR = 1.5
 PEER_OWN_PREMIUM_FACTOR = 2.0
 PEER_MISMATCH_KEYWORDS = ("不匹配", "应替换为")
+MODEL_ENABLED = True
+MODEL_MIN_CONFIDENCE = 0.5
+MODEL_ANCHOR_WEIGHT = 0.5
+
+
+def _resolve_cfg(cfg: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize an optional config dict (``None``/empty keeps code defaults)."""
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _cfg_float(cfg: dict[str, Any], key: str, default: float) -> float:
+    if not isinstance(cfg, dict):
+        return float(default)
+    try:
+        return float(cfg.get(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _cfg_int(cfg: dict[str, Any], key: str, default: int) -> int:
+    if not isinstance(cfg, dict):
+        return int(default)
+    try:
+        return int(cfg.get(key, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _model_multiple(model: dict[str, Any], key: str) -> float | None:
+    """Positive model-predicted target multiple for a per-share metric key."""
+    if not isinstance(model, dict) or not model.get("available"):
+        return None
+    mapping = {"pe_ttm": "pe", "pb": "pb", "ps": "ps"}
+    value = _num(model.get(mapping[key]))
+    if value is None or value <= 0:
+        return None
+    return value
+
+
+def _add_model_estimate(
+    estimates: list[tuple[float, float, float, float, dict[str, Any]]],
+    key: str,
+    base: float,
+    multiple: float,
+    model: dict[str, Any],
+    cfg: dict[str, Any],
+) -> None:
+    """Append a low-weight local-model implied-price estimate for one metric."""
+    band = _cfg_float(cfg, "target_band", TARGET_BAND)
+    weight = _cfg_float(cfg, "model_anchor_weight", MODEL_ANCHOR_WEIGHT)
+    names = {"pe_ttm": "PE-TTM", "pb": "PB", "ps": "PS"}
+    version = str(model.get("model_version") or model.get("version") or "?")
+    implied = base * multiple
+    estimates.append(
+        (
+            implied,
+            base * multiple * (1.0 - band),
+            base * multiple * (1.0 + band),
+            weight,
+            {
+                "metric": f"{key}_model",
+                "name": f"{names[key]}(本地模型)",
+                "base": _round(base),
+                "target_multiple": _round(multiple),
+                "target_source": f"本地LightGBM模型 v{version}",
+                "implied_price": _round(implied),
+                "implied_low": _round(base * multiple * (1.0 - band)),
+                "implied_high": _round(base * multiple * (1.0 + band)),
+                "weight": weight,
+                "model_version": version,
+            },
+        ),
+    )
 
 
 def _num(value: Any) -> float | None:
@@ -70,7 +143,10 @@ def _num(value: Any) -> float | None:
     return number
 
 
-def _restructuring_in_progress(metrics: dict[str, Any]) -> bool:
+def _restructuring_in_progress(
+    metrics: dict[str, Any],
+    cfg: dict[str, Any] | None = None,
+) -> bool:
     """Detect restructuring/asset-injection shells without flagging profitable
     high-multiple growth names.
 
@@ -90,19 +166,26 @@ def _restructuring_in_progress(metrics: dict[str, Any]) -> bool:
         return False
     if bps is None or bps <= 0 or sps_ttm is None or sps_ttm <= 0:
         return False
-    if growth is not None and growth >= GROWTH_LEADER_THRESHOLD:
+    growth_leader_threshold = _cfg_float(
+        cfg, "growth_leader_threshold", GROWTH_LEADER_THRESHOLD
+    )
+    if growth is not None and growth >= growth_leader_threshold:
         return False
     # Absolute shell: book and revenue per share are both near zero.
-    if bps < RESTRUCTURING_MIN_BPS and sps_ttm < RESTRUCTURING_MIN_SPS:
+    if bps < _cfg_float(cfg, "restructuring_min_bps", RESTRUCTURING_MIN_BPS) and sps_ttm < _cfg_float(
+        cfg, "restructuring_min_sps", RESTRUCTURING_MIN_SPS
+    ):
         return True
     # Otherwise only flag when earnings are negligible AND PB/PS are extreme.
-    if eps_ttm is not None and eps_ttm > RESTRUCTURING_MAX_EPS:
+    if eps_ttm is not None and eps_ttm > _cfg_float(
+        cfg, "restructuring_max_eps", RESTRUCTURING_MAX_EPS
+    ):
         return False
     pb_current = current_price / bps
     ps_current = current_price / sps_ttm
     return (
-        pb_current >= RESTRUCTURING_PB_RATIO
-        and ps_current >= RESTRUCTURING_PS_RATIO
+        pb_current >= _cfg_float(cfg, "restructuring_pb_ratio", RESTRUCTURING_PB_RATIO)
+        and ps_current >= _cfg_float(cfg, "restructuring_ps_ratio", RESTRUCTURING_PS_RATIO)
     )
 
 
@@ -157,10 +240,20 @@ def _weighted_growth(
     cagr: float | None,
     forecast: float | None,
     notes: list[str],
+    cfg: dict[str, Any] | None = None,
 ) -> float:
+    fallback_growth = _cfg_float(cfg, "fallback_growth", DEFAULT_FALLBACK_GROWTH)
+    max_growth = _cfg_float(cfg, "max_growth", MAX_GROWTH)
+    cagr_weight = _clamp(
+        _cfg_float(cfg, "growth_cagr_weight", 0.6), 0.0, 1.0
+    )
+    forecast_weight = 1.0 - cagr_weight
     if cagr is not None and forecast is not None:
-        value = 0.6 * cagr + 0.4 * forecast
-        notes.append(f"增长假设采用近3年营收CAGR({cagr:.1%})与一致预期增速({forecast:.1%})加权。")
+        value = cagr_weight * cagr + forecast_weight * forecast
+        notes.append(
+            f"增长假设采用近3年营收CAGR({cagr:.1%})与一致预期增速({forecast:.1%})"
+            f"加权（权重 {cagr_weight:.0%}/{forecast_weight:.0%}）。"
+        )
     elif cagr is not None:
         value = cagr
         notes.append(f"增长假设采用近3年营收CAGR({cagr:.1%})；缺少一致预期数据。")
@@ -168,9 +261,9 @@ def _weighted_growth(
         value = forecast
         notes.append(f"增长假设采用一致预期增速({forecast:.1%})；缺少历史营收CAGR。")
     else:
-        value = DEFAULT_FALLBACK_GROWTH
-        notes.append(f"缺少历史与一致预期增速数据，按默认 {DEFAULT_FALLBACK_GROWTH:.1%} 假设。")
-    return _clamp(value, 0.0, MAX_GROWTH)
+        value = fallback_growth
+        notes.append(f"缺少历史与一致预期增速数据，按默认 {fallback_growth:.1%} 假设。")
+    return _clamp(value, 0.0, max_growth)
 
 
 def _resolve_forward_pe(
@@ -197,6 +290,7 @@ def _growth_leader_relative(
     metrics: dict[str, Any],
     notes: list[str],
     growth: float | None,
+    cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Relative valuation for high-growth leaders.
 
@@ -207,6 +301,7 @@ def _growth_leader_relative(
     historical p50 far above what the market pays today). When forward data is
     unavailable, fall back to the previous own-history-p50 anchor.
     """
+    cfg = _resolve_cfg(cfg)
     historical = metrics.get("historical") or {}
     peers = metrics.get("industry_peers") or {}
     industry = metrics.get("industry_bench") or {}
@@ -217,6 +312,26 @@ def _growth_leader_relative(
     forecast_year = metrics.get("forecast_year")
     current_price = _num(metrics.get("current_price"))
     forward_pe = _resolve_forward_pe(peers, forecast_year)
+    growth_leader_threshold = _cfg_float(
+        cfg, "growth_leader_threshold", GROWTH_LEADER_THRESHOLD
+    )
+    target_band = _cfg_float(cfg, "target_band", TARGET_BAND)
+    leader_history_weight = _cfg_float(
+        cfg, "leader_history_weight", LEADER_HISTORY_WEIGHT
+    )
+    leader_history_cap_factor = _cfg_float(
+        cfg, "leader_history_cap_factor", LEADER_HISTORY_CAP_FACTOR
+    )
+    model_anchor_weight = _cfg_float(cfg, "model_anchor_weight", MODEL_ANCHOR_WEIGHT)
+    target_percentile = _cfg_float(
+        cfg, "target_percentile", DEFAULT_TARGET_PERCENTILE
+    )
+    cyclical_boom_pe_ratio = _cfg_float(
+        cfg, "cyclical_boom_pe_ratio", CYCLICAL_BOOM_PE_RATIO
+    )
+    leader_primary_min_weight = _cfg_float(
+        cfg, "leader_primary_min_weight", 1.0
+    )
     has_forward = (
         forward_eps is not None
         and forward_eps > 0
@@ -226,12 +341,12 @@ def _growth_leader_relative(
 
     if has_forward:
         notes.append(
-            f"高成长龙头分支：一致预期增速 {growth:.1%} ≥ {GROWTH_LEADER_THRESHOLD:.0%}，"
+            f"高成长龙头分支：一致预期增速 {growth:.1%} ≥ {growth_leader_threshold:.0%}，"
             "采用 forward PE 为主锚，并以自身历史分位低权重校准（带上限）。"
         )
     else:
         notes.append(
-            f"高成长龙头分支：一致预期增速 {growth:.1%} ≥ {GROWTH_LEADER_THRESHOLD:.0%}，"
+            f"高成长龙头分支：一致预期增速 {growth:.1%} ≥ {growth_leader_threshold:.0%}，"
             "缺少 forward EPS/PE，采用自身近3年历史50分位为主锚，同行/行业仅作参考。"
         )
 
@@ -260,8 +375,6 @@ def _growth_leader_relative(
         p50 = _num(hist.get("p50"))
         p25 = _num(hist.get("p25"))
         p75 = _num(hist.get("p75"))
-        if p50 is None or p50 <= 0:
-            return
         if key == "pe_ttm":
             if p25 is not None and p25 <= 0:
                 notes.append("PE 历史分位不可靠（p25≤0），龙头主锚改用 PB。")
@@ -269,30 +382,67 @@ def _growth_leader_relative(
         elif key == "pb":
             if p25 is not None and p25 <= 0:
                 return
-        multiple = p50
+        # target_percentile 控制历史锚分位：<=0.25 用 p25，>=0.75 用 p75，
+        # 其余用 p50（默认 0.5，行为与之前一致）。
+        quantile = (
+            0.25
+            if target_percentile <= 0.25
+            else 0.75
+            if target_percentile >= 0.75
+            else 0.5
+        )
+        anchor_value = {0.25: p25, 0.5: p50, 0.75: p75}[quantile]
+        if anchor_value is None or anchor_value <= 0:
+            anchor_value = p50
+        if anchor_value is None or anchor_value <= 0:
+            return
+        multiple = anchor_value
+        if key == "pe_ttm":
+            current_pe = _num((metrics.get("valuation") or {}).get("pe_ttm"))
+            peer_pe = _num((peers.get("pe") or {}).get("median"))
+            pe_candidates = [
+                value
+                for value in (multiple, peer_pe)
+                if value is not None and value > 0
+            ]
+            if (
+                current_pe is not None
+                and current_pe > 0
+                and pe_candidates
+                and current_pe <= cyclical_boom_pe_ratio * min(pe_candidates)
+            ):
+                percentile_label = {0.25: "25", 0.5: "50", 0.75: "75"}[quantile]
+                notes.append(
+                    f"当前PE {current_pe:.2f} 显著低于自身历史{percentile_label}分位"
+                    f"（≤ {min(pe_candidates):.2f} × {cyclical_boom_pe_ratio:.0%}），"
+                    "疑似周期景气高点盈利，龙头分支弃用 PE 历史锚，改用 PB。"
+                )
+                return
         if cap_multiple is not None and cap_multiple > 0 and multiple > cap_multiple:
             label = "PE-TTM" if key == "pe_ttm" else "PB"
+            percentile_label = {0.25: "25", 0.5: "50", 0.75: "75"}[quantile]
             notes.append(
-                f"{label}自身历史50分位 {multiple:.2f} 超过龙头锚上限 "
+                f"{label}自身历史{percentile_label}分位 {multiple:.2f} 超过龙头锚上限 "
                 f"{cap_multiple:.2f}，已按上限参与校准。"
             )
             multiple = cap_multiple
             p25 = None
             p75 = None
         low_mult = (
-            p25 if p25 is not None and p25 > 0 else multiple * (1.0 - TARGET_BAND)
+            p25 if p25 is not None and p25 > 0 else multiple * (1.0 - target_band)
         )
         high_mult = (
-            p75 if p75 is not None and p75 > 0 else multiple * (1.0 + TARGET_BAND)
+            p75 if p75 is not None and p75 > 0 else multiple * (1.0 + target_band)
         )
         low_mult = min(low_mult, multiple)
         high_mult = max(high_mult, multiple)
         label = "PE-TTM" if key == "pe_ttm" else "PB"
         name_suffix = "龙头主锚" if weight >= 1.0 else "龙头校准"
+        percentile_label = {0.25: "25", 0.5: "50", 0.75: "75"}[quantile]
         target_source = (
-            "自身历史50分位(龙头主锚)"
+            f"自身历史{percentile_label}分位(龙头主锚)"
             if weight >= 1.0
-            else "自身历史50分位(龙头校准)"
+            else f"自身历史{percentile_label}分位(龙头校准)"
         )
         estimates.append(
             (
@@ -320,8 +470,8 @@ def _growth_leader_relative(
             estimates.append(
                 (
                     fwd_implied,
-                    fwd_implied * (1.0 - TARGET_BAND),
-                    fwd_implied * (1.0 + TARGET_BAND),
+                    fwd_implied * (1.0 - target_band),
+                    fwd_implied * (1.0 + target_band),
                     1.0,
                     {
                         "metric": "pe_ttm_fwd_leader",
@@ -330,8 +480,8 @@ def _growth_leader_relative(
                         "target_multiple": _round(forward_pe),
                         "target_source": "类似公司中位数(forward PE)",
                         "implied_price": _round(fwd_implied),
-                        "implied_low": _round(fwd_implied * (1.0 - TARGET_BAND)),
-                        "implied_high": _round(fwd_implied * (1.0 + TARGET_BAND)),
+                        "implied_low": _round(fwd_implied * (1.0 - target_band)),
+                        "implied_high": _round(fwd_implied * (1.0 + target_band)),
                         "weight": 1.0,
                     },
                 ),
@@ -341,8 +491,8 @@ def _growth_leader_relative(
             estimates.append(
                 (
                     pb_implied,
-                    pb_implied * (1.0 - TARGET_BAND),
-                    pb_implied * (1.0 + TARGET_BAND),
+                    pb_implied * (1.0 - target_band),
+                    pb_implied * (1.0 + target_band),
                     1.0,
                     {
                         "metric": "pb_peer_leader",
@@ -351,8 +501,8 @@ def _growth_leader_relative(
                         "target_multiple": _round(pb_anchor),
                         "target_source": "类似公司中位数/当前PB(取低)",
                         "implied_price": _round(pb_implied),
-                        "implied_low": _round(pb_implied * (1.0 - TARGET_BAND)),
-                        "implied_high": _round(pb_implied * (1.0 + TARGET_BAND)),
+                        "implied_low": _round(pb_implied * (1.0 - target_band)),
+                        "implied_high": _round(pb_implied * (1.0 + target_band)),
                         "weight": 1.0,
                     },
                 ),
@@ -360,18 +510,41 @@ def _growth_leader_relative(
         add_own_history_anchor(
             "pe_ttm",
             eps_ttm,
-            LEADER_HISTORY_WEIGHT,
-            forward_pe * LEADER_HISTORY_CAP_FACTOR,
+            leader_history_weight,
+            forward_pe * leader_history_cap_factor,
         )
         add_own_history_anchor(
             "pb",
             bps,
-            LEADER_HISTORY_WEIGHT,
-            pb_anchor * LEADER_HISTORY_CAP_FACTOR if pb_anchor else None,
+            leader_history_weight,
+            pb_anchor * leader_history_cap_factor if pb_anchor else None,
         )
     else:
         add_own_history_anchor("pe_ttm", eps_ttm, 1.0)
         add_own_history_anchor("pb", bps, 1.0)
+
+    model_targets = metrics.get("model_targets") or {}
+    model_enabled = bool(cfg.get("model_enabled", MODEL_ENABLED))
+    model_min_confidence = _cfg_float(
+        cfg, "model_min_confidence", MODEL_MIN_CONFIDENCE
+    )
+    model_confidence = _num(model_targets.get("confidence")) if isinstance(model_targets, dict) else None
+    model_usable = (
+        model_enabled
+        and isinstance(model_targets, dict)
+        and bool(model_targets.get("available"))
+        and model_confidence is not None
+        and model_confidence >= model_min_confidence
+    )
+    if model_usable:
+        for key, base in (("pe_ttm", eps_ttm), ("pb", bps), ("ps", sps_ttm)):
+            multiple = _model_multiple(model_targets, key)
+            if base is None or base <= 0 or multiple is None:
+                continue
+            _add_model_estimate(estimates, key, base, multiple, model_targets, cfg)
+        notes.append(
+            f"本地LightGBM模型参考倍数按 {model_anchor_weight:.0%} 权重混入龙头分支。"
+        )
 
     if not estimates:
         return None
@@ -416,11 +589,21 @@ def _growth_leader_relative(
             [(estimate[0], estimate[3]) for estimate in estimates]
         )
         basis = "forward PE + PB(高成长龙头)"
+        low = min(estimate[1] for estimate in estimates)
+        high = max(estimate[2] for estimate in estimates)
     else:
-        mid = float(statistics.median([estimate[0] for estimate in estimates]))
+        # 可靠主锚取中位：低权重的本地模型/历史校准锚只作参考，
+        # 不参与无 forward 数据时的龙头中枢与区间计算；阈值由参数
+        # leader_primary_min_weight 控制（调低即可让参考锚参与中枢）。
+        primary = [
+            estimate
+            for estimate in estimates
+            if estimate[3] >= leader_primary_min_weight
+        ] or estimates
+        mid = float(statistics.median([estimate[0] for estimate in primary]))
         basis = "自身历史50分位(高成长龙头)"
-    low = min(estimate[1] for estimate in estimates)
-    high = max(estimate[2] for estimate in estimates)
+        low = min(estimate[1] for estimate in primary)
+        high = max(estimate[2] for estimate in primary)
 
     peer_names = [
         str(item.get("name"))
@@ -451,7 +634,10 @@ def _growth_leader_relative(
     }
 
 
-def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
+def relative_valuation(
+    metrics: dict[str, Any],
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Implied price from target multiples.
 
     Target-multiple hierarchy: comparable-company median -> own 3y historical
@@ -459,8 +645,63 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
     is available and a forward-PE estimate is added when consensus EPS exists.
     Cyclical industries drop PE-TTM and rely on PB/PS. Loss-making companies
     (EPS-TTM <= 0) anchor PB on own historical percentile and treat peer
-    PB/PS as reference-only.
+    PB/PS as reference-only. A local LightGBM model (``metrics.model_targets``)
+    is blended in as a low-weight anchor per metric and used as the last
+    fallback target when peers/history/industry are all unavailable.
     """
+    cfg = _resolve_cfg(cfg)
+    notes: list[str] = []
+    cyclical_keywords = list(
+        cfg.get("cyclical_keywords", CYCLICAL_KEYWORDS)
+    )
+    peer_mismatch_keywords = list(
+        cfg.get("peer_mismatch_keywords", PEER_MISMATCH_KEYWORDS)
+    )
+    growth_leader_threshold = _cfg_float(
+        cfg, "growth_leader_threshold", GROWTH_LEADER_THRESHOLD
+    )
+    target_band = _cfg_float(cfg, "target_band", TARGET_BAND)
+    cyclical_boom_pe_ratio = _cfg_float(
+        cfg, "cyclical_boom_pe_ratio", CYCLICAL_BOOM_PE_RATIO
+    )
+    ps_peer_divergence_factor = _cfg_float(
+        cfg, "ps_peer_divergence_factor", PS_PEER_DIVERGENCE_FACTOR
+    )
+    peer_own_premium_factor = _cfg_float(
+        cfg, "peer_own_premium_factor", PEER_OWN_PREMIUM_FACTOR
+    )
+    peer_industry_band = tuple(
+        float(value) for value in cfg.get(
+            "peer_industry_band", PEER_INDUSTRY_BAND
+        )
+    )
+    history_cap = _cfg_float(cfg, "history_cap", HISTORY_CAP)
+    history_weight = _cfg_float(cfg, "history_weight", HISTORY_WEIGHT)
+    metric_outlier_factor = _cfg_float(
+        cfg, "metric_outlier_factor", METRIC_OUTLIER_FACTOR
+    )
+    model_enabled = bool(cfg.get("model_enabled", MODEL_ENABLED))
+    model_min_confidence = _cfg_float(
+        cfg, "model_min_confidence", MODEL_MIN_CONFIDENCE
+    )
+    model_anchor_weight = _cfg_float(
+        cfg, "model_anchor_weight", MODEL_ANCHOR_WEIGHT
+    )
+    model_targets = metrics.get("model_targets") or {}
+    model_confidence = _num(model_targets.get("confidence")) if isinstance(model_targets, dict) else None
+    model_usable = (
+        model_enabled
+        and isinstance(model_targets, dict)
+        and bool(model_targets.get("available"))
+        and model_confidence is not None
+        and model_confidence >= model_min_confidence
+    )
+    if model_usable:
+        notes.append(
+            f"本地LightGBM模型可用（置信度 {model_confidence:.0%}），"
+            f"各口径按 {model_anchor_weight:.0%} 权重混入模型目标倍数。"
+        )
+
     valuation = metrics.get("valuation") or {}
     historical = metrics.get("historical") or {}
     peers = metrics.get("industry_peers") or {}
@@ -471,8 +712,7 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
     forward_eps = _num(metrics.get("forecast_eps"))
     forecast_year = metrics.get("forecast_year")
     loss_making = eps_ttm is not None and eps_ttm <= 0
-    cyclical = any(keyword and keyword in industry_name for keyword in CYCLICAL_KEYWORDS)
-    notes: list[str] = []
+    cyclical = any(keyword and keyword in industry_name for keyword in cyclical_keywords)
     if cyclical:
         notes.append(
             f"行业「{industry_name or '未知'}」为周期行业，PE-TTM 不参与相对估值，优先采用 PB/PS。"
@@ -484,14 +724,14 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
     peer_reason = str(peers.get("reason") or "")
     peers_low_confidence = (
         peers.get("source") in ("manual", "llm")
-        and any(keyword in peer_reason for keyword in PEER_MISMATCH_KEYWORDS)
+        and any(keyword in peer_reason for keyword in peer_mismatch_keywords)
     )
     if peers_low_confidence:
         notes.append(
             "大模型校验提示可比公司名单与目标公司业务/规模不匹配，"
             "目标倍数改用自身历史分位为主锚，同行仅作参考。"
         )
-    if _restructuring_in_progress(metrics):
+    if _restructuring_in_progress(metrics, cfg):
         return {
             "available": False,
             "method": "relative",
@@ -501,12 +741,14 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
                 "相对估值不适用，建议等待注入资产并表后再估值。"
             ],
         }
-    growth_leader = growth is not None and growth >= GROWTH_LEADER_THRESHOLD
+    growth_leader = growth is not None and growth >= growth_leader_threshold
     if growth_leader:
-        leader = _growth_leader_relative(metrics, notes, growth)
+        leader = _growth_leader_relative(metrics, notes, growth, cfg)
         if leader is not None:
             return leader
-    notes.append("目标倍数层级：可比公司中位数 → 自身历史50分位 → 行业整体中位数。")
+    notes.append(
+        "目标倍数层级：可比公司中位数 → 自身历史50分位 → 行业整体中位数 → 本地模型。"
+    )
 
     per_share = {
         "pe_ttm": metrics.get("eps_ttm"),
@@ -568,13 +810,13 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
                 current_pe is not None
                 and current_pe > 0
                 and pe_candidates
-                and current_pe <= CYCLICAL_BOOM_PE_RATIO * min(pe_candidates)
+                and current_pe <= cyclical_boom_pe_ratio * min(pe_candidates)
             ):
                 cyclical_boom = True
         if cyclical_boom:
             notes.append(
                 f"当前PE {current_pe:.2f} 显著低于同行与自身历史中位数"
-                f"（≤ {min(pe_candidates):.2f} × {CYCLICAL_BOOM_PE_RATIO:.0%}），"
+                f"（≤ {min(pe_candidates):.2f} × {cyclical_boom_pe_ratio:.0%}），"
                 "疑似周期景气高点盈利，PE 口径不适用，改用 PB/PS。"
             )
             continue
@@ -595,7 +837,7 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
             if (
                 current_ps is not None
                 and current_ps > 0
-                and peers_median > current_ps * PS_PEER_DIVERGENCE_FACTOR
+                and peers_median > current_ps * ps_peer_divergence_factor
             ):
                 notes.append(
                     f"同行PS中位数 {peers_median:.2f} 与自身当前PS {current_ps:.2f} "
@@ -609,13 +851,13 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
                 multiple_low = min(
                     hist_p25
                     if hist_p25 is not None and hist_p25 > 0
-                    else hist_p50 * (1.0 - TARGET_BAND),
+                    else hist_p50 * (1.0 - target_band),
                     hist_p50,
                 )
                 multiple_high = max(
                     hist_p75
                     if hist_p75 is not None and hist_p75 > 0
-                    else hist_p50 * (1.0 + TARGET_BAND),
+                    else hist_p50 * (1.0 + target_band),
                     hist_p50,
                 )
                 estimates.append(
@@ -648,6 +890,11 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
                             "implied_price": _round(base * peers_median),
                             "weight": 0,
                         }
+                    )
+                model_multiple = _model_multiple(model_targets, key)
+                if model_usable and model_multiple is not None:
+                    _add_model_estimate(
+                        estimates, key, base, model_multiple, model_targets, cfg
                     )
                 continue
             if key == "ps":
@@ -682,7 +929,7 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
             and peers_median > 0
             and current_multiple is not None
             and current_multiple > 0
-            and current_multiple > peers_median * PEER_OWN_PREMIUM_FACTOR
+            and current_multiple > peers_median * peer_own_premium_factor
         ):
             if hist_p50 is not None and hist_p50 > 0 and hist_p50 > peers_median:
                 target = hist_p50
@@ -713,7 +960,7 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
                 target = industry_median
                 source = "行业整体中位数"
                 if peers_median is not None and peers_median > 0:
-                    band_low, band_high = PEER_INDUSTRY_BAND
+                    band_low, band_high = peer_industry_band
                     too_low = peers_median < band_low * industry_median
                     too_high = peers_median > band_high * industry_median
                     # Manually/LLM-validated peers represent a vetted comparable
@@ -741,10 +988,19 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
             ):
                 target = hist_p50
                 source = "自身历史50分位"
+            elif model_usable:
+                model_multiple = _model_multiple(model_targets, key)
+                if model_multiple is not None:
+                    target = model_multiple
+                    source = "本地LightGBM模型"
+                    notes.append(
+                        f"同行/历史/行业数据均不可用，{names[key]} 目标倍数"
+                        f"回退至本地模型 {model_multiple:.2f}。"
+                    )
         if target is None:
             continue
-        if key == "pe_ttm":
-            target = _pe_target_adjusted(target, growth, notes)
+        if key == "pe_ttm" and source != "本地LightGBM模型":
+            target = _pe_target_adjusted(target, growth, notes, cfg)
         implied = base * target
         if implied <= 0:
             continue
@@ -753,12 +1009,12 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
         multiple_low = (
             hist_p25
             if hist_p25 is not None and hist_p25 > 0
-            else target * (1.0 - TARGET_BAND)
+            else target * (1.0 - target_band)
         )
         multiple_high = (
             hist_p75
             if hist_p75 is not None and hist_p75 > 0
-            else target * (1.0 + TARGET_BAND)
+            else target * (1.0 + target_band)
         )
         multiple_low = min(multiple_low, target)
         multiple_high = max(multiple_high, target)
@@ -791,16 +1047,16 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
             and hist_p50 > 0
             and not pe_history_unusable
         ):
-            cap_multiple = HISTORY_CAP * target
+            cap_multiple = history_cap * target
             hist_multiple_low = (
                 hist_p25
                 if hist_p25 is not None and hist_p25 > 0
-                else hist_p50 * (1.0 - TARGET_BAND)
+                else hist_p50 * (1.0 - target_band)
             )
             hist_multiple_high = (
                 hist_p75
                 if hist_p75 is not None and hist_p75 > 0
-                else hist_p50 * (1.0 + TARGET_BAND)
+                else hist_p50 * (1.0 + target_band)
             )
             hist_multiple = min(hist_p50, cap_multiple)
             hist_multiple_low = min(
@@ -812,7 +1068,7 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
             if hist_p50 > cap_multiple:
                 notes.append(
                     f"{names[key]}自身历史50分位 {hist_p50:.2f} 显著高于当前基准"
-                    f"（上限 {HISTORY_CAP:.1f} 倍），已按上限参与。"
+                    f"（上限 {history_cap:.1f} 倍），已按上限参与。"
                 )
             hist_price = base * hist_multiple
             estimates.append(
@@ -820,7 +1076,7 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
                     hist_price,
                     base * hist_multiple_low,
                     base * hist_multiple_high,
-                    HISTORY_WEIGHT,
+                    history_weight,
                     {
                         "metric": f"{key}_hist",
                         "name": f"{names[key]}(历史分位)",
@@ -830,7 +1086,7 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
                         "implied_price": _round(hist_price),
                         "implied_low": _round(base * hist_multiple_low),
                         "implied_high": _round(base * hist_multiple_high),
-                        "weight": HISTORY_WEIGHT,
+                        "weight": history_weight,
                     },
                 ),
             )
@@ -844,8 +1100,8 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
                 )
                 continue
             forward_implied = forward_eps * forward_pe
-            fwd_low = forward_eps * forward_pe * (1.0 - TARGET_BAND)
-            fwd_high = forward_eps * forward_pe * (1.0 + TARGET_BAND)
+            fwd_low = forward_eps * forward_pe * (1.0 - target_band)
+            fwd_high = forward_eps * forward_pe * (1.0 + target_band)
             estimates.append(
                 (
                     forward_implied,
@@ -859,12 +1115,18 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
                         "target_multiple": _round(forward_pe),
                         "target_source": "类似公司中位数(forward PE)",
                         "implied_price": _round(forward_implied),
-                        "implied_low": _round(fwd_low),
-                        "implied_high": _round(fwd_high),
+                        "implied_low": _round(forward_eps * forward_pe * (1.0 - target_band)),
+                        "implied_high": _round(forward_eps * forward_pe * (1.0 + target_band)),
                         "weight": 1.0,
                     },
                 ),
             )
+        if model_usable and source != "本地LightGBM模型":
+            model_multiple = _model_multiple(model_targets, key)
+            if model_multiple is not None:
+                _add_model_estimate(
+                    estimates, key, base, model_multiple, model_targets, cfg
+                )
     if len(estimates) >= 3:
         median_price = float(
             statistics.median(estimate[0] for estimate in estimates)
@@ -872,20 +1134,20 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
         dropped = [
             estimate
             for estimate in estimates
-            if estimate[0] > METRIC_OUTLIER_FACTOR * median_price
+            if estimate[0] > metric_outlier_factor * median_price
         ]
         if len(estimates) - len(dropped) >= 2 and dropped:
             estimates = [
                 estimate
                 for estimate in estimates
-                if estimate[0] <= METRIC_OUTLIER_FACTOR * median_price
+                if estimate[0] <= metric_outlier_factor * median_price
             ]
             for estimate in dropped:
                 detail = estimate[4]
                 notes.append(
                     f"剔除异常放大口径：{detail.get('name', detail.get('metric', ''))}"
                     f"（隐含价 {_round(detail.get('implied_price'))} 元，"
-                    f"超过方法中位数 {METRIC_OUTLIER_FACTOR:.0f} 倍）。"
+                    f"超过方法中位数 {metric_outlier_factor:.0f} 倍）。"
                 )
     if not estimates:
         return {
@@ -896,12 +1158,12 @@ def relative_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
     history_blends = [
         estimate[4]
         for estimate in estimates
-        if estimate[3] == HISTORY_WEIGHT
+        if estimate[3] == history_weight
     ]
     if history_blends:
         notes.append(
             "混入自身历史分位估值（权重"
-            + f"{HISTORY_WEIGHT:.0%}"
+            + f"{history_weight:.0%}"
             + "）："
             + "、".join(
                 f"{detail.get('name', detail.get('metric', ''))} "
@@ -982,18 +1244,24 @@ def _pe_target_adjusted(
     raw_target: float,
     growth: float | None,
     notes: list[str],
+    cfg: dict[str, Any] | None = None,
 ) -> float:
     """Calibrate a PE target with consensus growth (g% * PEG_FACTOR)."""
+    peg_factor = _cfg_float(cfg, "peg_factor", PEG_FACTOR)
+    min_peg_growth = _cfg_float(cfg, "min_peg_growth", MIN_PEG_GROWTH)
+    peg_band = tuple(
+        float(value) for value in cfg.get("peg_band", [0.6, 1.5])
+    )
     if growth is None or growth <= 0:
         return raw_target
-    if growth < MIN_PEG_GROWTH:
+    if growth < min_peg_growth:
         notes.append(
-            f"一致预期增速 {growth:.1%} 低于 {MIN_PEG_GROWTH:.0%}，"
+            f"一致预期增速 {growth:.1%} 低于 {min_peg_growth:.0%}，"
             "PEG 校准不适用，目标倍数保持行业/同行口径。"
         )
         return raw_target
-    peg_target = growth * 100.0 * PEG_FACTOR
-    adjusted = _clamp(peg_target, raw_target * 0.6, raw_target * 1.5)
+    peg_target = growth * 100.0 * peg_factor
+    adjusted = _clamp(peg_target, raw_target * peg_band[0], raw_target * peg_band[1])
     if abs(adjusted - raw_target) > 1e-9:
         notes.append(
             f"PE 目标倍数按 PEG 校准：{raw_target:.2f} → {adjusted:.2f}"
@@ -1021,8 +1289,18 @@ def _discounted_cash_flow(
     return present_value
 
 
-def dcf_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
+def dcf_valuation(
+    metrics: dict[str, Any],
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Two-stage DCF with 5 explicit years and a terminal value."""
+    cfg = _resolve_cfg(cfg)
+    discount_rate = _cfg_float(cfg, "discount_rate", DEFAULT_DISCOUNT_RATE)
+    terminal_growth = _cfg_float(cfg, "terminal_growth", DEFAULT_TERMINAL_GROWTH)
+    forecast_years = _cfg_int(cfg, "forecast_years", DEFAULT_FORECAST_YEARS)
+    sensitivity_rates = tuple(
+        float(rate) for rate in cfg.get("sensitivity_rates", SENSITIVITY_RATES)
+    )
     fcf = _num(metrics.get("fcf"))
     total_shares = _num(metrics.get("total_shares"))
     if fcf is None or total_shares is None or total_shares <= 0:
@@ -1042,19 +1320,25 @@ def dcf_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
         _num(metrics.get("revenue_growth_cagr")),
         _num(metrics.get("forecast_growth")),
         notes,
+        cfg,
     )
     fcf_per_share = fcf / total_shares
     base = _discounted_cash_flow(
         fcf_per_share,
         growth,
-        DEFAULT_DISCOUNT_RATE,
-        DEFAULT_TERMINAL_GROWTH,
-        DEFAULT_FORECAST_YEARS,
+        discount_rate,
+        terminal_growth,
+        forecast_years,
     )
-    prices = {rate: _discounted_cash_flow(fcf_per_share, growth, rate, DEFAULT_TERMINAL_GROWTH, DEFAULT_FORECAST_YEARS) for rate in SENSITIVITY_RATES}
+    prices = {
+        rate: _discounted_cash_flow(
+            fcf_per_share, growth, rate, terminal_growth, forecast_years
+        )
+        for rate in sensitivity_rates
+    }
     notes.append(
-        f"折现率 {DEFAULT_DISCOUNT_RATE:.0%}，永续增速 {DEFAULT_TERMINAL_GROWTH:.0%}，"
-        f"显性期 {DEFAULT_FORECAST_YEARS} 年；敏感性折现率 {'/'.join(f'{r:.0%}' for r in SENSITIVITY_RATES)}。"
+        f"折现率 {discount_rate:.0%}，永续增速 {terminal_growth:.0%}，"
+        f"显性期 {forecast_years} 年；敏感性折现率 {'/'.join(f'{r:.0%}' for r in sensitivity_rates)}。"
     )
     return {
         "available": True,
@@ -1064,9 +1348,9 @@ def dcf_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
         "high": _round(max(prices.values())),
         "fcf_per_share": _round(fcf_per_share),
         "growth": _round(growth, 4),
-        "discount_rate": DEFAULT_DISCOUNT_RATE,
-        "terminal_growth": DEFAULT_TERMINAL_GROWTH,
-        "years": DEFAULT_FORECAST_YEARS,
+        "discount_rate": discount_rate,
+        "terminal_growth": terminal_growth,
+        "years": forecast_years,
         "sensitivity": {
             f"{rate:.0%}": _round(price) for rate, price in sorted(prices.items())
         },
@@ -1074,8 +1358,20 @@ def dcf_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def ddm_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
+def ddm_valuation(
+    metrics: dict[str, Any],
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Gordon growth dividend discount model."""
+    cfg = _resolve_cfg(cfg)
+    discount_rate = _cfg_float(cfg, "discount_rate", DEFAULT_DISCOUNT_RATE)
+    sensitivity_rates = tuple(
+        float(rate) for rate in cfg.get("sensitivity_rates", SENSITIVITY_RATES)
+    )
+    min_dividend_yield = _cfg_float(
+        cfg, "min_dividend_yield", MIN_DIVIDEND_YIELD
+    )
+    ddm_growth_cap = _cfg_float(cfg, "ddm_growth_cap", 0.10)
     dps = _num(metrics.get("dps"))
     roe = _num(metrics.get("roe"))
     if dps is None or dps <= 0:
@@ -1100,32 +1396,32 @@ def ddm_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
     current_price = _num(metrics.get("current_price"))
     if current_price is not None and current_price > 0:
         dividend_yield = dps / current_price
-        if dividend_yield < MIN_DIVIDEND_YIELD:
+        if dividend_yield < min_dividend_yield:
             return {
                 "available": False,
                 "method": "ddm",
                 "notes": [
-                    f"股息率 {dividend_yield:.2%} 低于 {MIN_DIVIDEND_YIELD:.0%}，"
+                    f"股息率 {dividend_yield:.2%} 低于 {min_dividend_yield:.0%}，"
                     "股息折现不适用。"
                 ],
             }
     notes: list[str] = []
     payout = _clamp(payout, 0.0, 1.0)
-    growth = _clamp(roe * (1.0 - payout), 0.0, 0.10)
-    if DEFAULT_DISCOUNT_RATE <= growth:
+    growth = _clamp(roe * (1.0 - payout), 0.0, ddm_growth_cap)
+    if discount_rate <= growth:
         return {
             "available": False,
             "method": "ddm",
             "notes": ["股息增长率不低于折现率，戈登模型不适用。"],
         }
-    price = dps * (1.0 + growth) / (DEFAULT_DISCOUNT_RATE - growth)
+    price = dps * (1.0 + growth) / (discount_rate - growth)
     sensitivity: dict[float, float] = {}
-    for rate in SENSITIVITY_RATES:
+    for rate in sensitivity_rates:
         if rate > growth + 0.01:
             sensitivity[rate] = dps * (1.0 + growth) / (rate - growth)
     all_prices = [price] + list(sensitivity.values())
     notes.append(
-        f"增长假设 g=ROE×(1-分红率)={growth:.1%}，折现率 {DEFAULT_DISCOUNT_RATE:.0%}。"
+        f"增长假设 g=ROE×(1-分红率)={growth:.1%}，折现率 {discount_rate:.0%}。"
     )
     return {
         "available": True,
@@ -1136,7 +1432,7 @@ def ddm_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
         "dps": _round(dps),
         "growth": _round(growth, 4),
         "payout_ratio": _round(payout, 4),
-        "discount_rate": DEFAULT_DISCOUNT_RATE,
+        "discount_rate": discount_rate,
         "sensitivity": {
             f"{rate:.0%}": _round(value) for rate, value in sorted(sensitivity.items())
         },
@@ -1147,12 +1443,103 @@ def ddm_valuation(metrics: dict[str, Any]) -> dict[str, Any]:
 DISCLAIMER = "以上为基于历史财务数据与公开预期的估算区间，不构成投资建议或收益保证。"
 
 
-def estimate_fair_value(metrics: dict[str, Any]) -> dict[str, Any]:
+def estimate_fair_value(
+    metrics: dict[str, Any],
+    cfg: dict[str, Any] | None = None,
+    config_source: str = "default",
+    config_overrides: list[str] | None = None,
+) -> dict[str, Any]:
     """Combine available valuation methods into a low/mid/high range."""
+    cfg = _resolve_cfg(cfg)
+    discount_rate = _cfg_float(cfg, "discount_rate", DEFAULT_DISCOUNT_RATE)
+    terminal_growth = _cfg_float(cfg, "terminal_growth", DEFAULT_TERMINAL_GROWTH)
+    forecast_years = _cfg_int(cfg, "forecast_years", DEFAULT_FORECAST_YEARS)
+    target_percentile = _cfg_float(
+        cfg, "target_percentile", DEFAULT_TARGET_PERCENTILE
+    )
+    method_weights = dict(cfg.get("method_weights", METHOD_WEIGHTS))
+    outlier_band = [
+        float(value)
+        for value in cfg.get("outlier_band", [OUTLIER_LOW_FACTOR, OUTLIER_HIGH_FACTOR])
+    ]
+    outlier_low, outlier_high = outlier_band[0], outlier_band[1]
+    verdict_band = _cfg_float(cfg, "verdict_band", VERDICT_BAND)
+    disclaimer = str(cfg.get("disclaimer", DISCLAIMER))
+
+    manual = cfg.get("manual_fair_value")
+    if isinstance(manual, dict):
+        manual_mid = _num(manual.get("mid"))
+        if manual_mid is not None and manual_mid > 0:
+            manual_low = _num(manual.get("low"))
+            manual_high = _num(manual.get("high"))
+            low = (
+                manual_low
+                if manual_low is not None and 0 < manual_low <= manual_mid
+                else manual_mid
+            )
+            high = (
+                manual_high
+                if manual_high is not None and manual_high >= manual_mid
+                else manual_mid
+            )
+            note = str(
+                manual.get("note")
+                or "人工估值区间，待资产并表/注入确认后更新。"
+            )
+            current_price = _num(metrics.get("current_price"))
+            if current_price is None or current_price <= 0:
+                verdict: dict[str, Any] = {
+                    "label": "数据不足",
+                    "text": "缺少当前股价，无法判断低估/合理/高估。",
+                }
+            else:
+                margin = (current_price - manual_mid) / manual_mid
+                if margin < -verdict_band:
+                    verdict_label = "低估"
+                elif margin > verdict_band:
+                    verdict_label = "高估"
+                else:
+                    verdict_label = "合理"
+                verdict = {
+                    "label": verdict_label,
+                    "current_price": _round(current_price),
+                    "margin": _round(margin, 4),
+                    "text": (
+                        f"当前股价 {_round(current_price)} 元相对人工估值中枢 "
+                        f"{_round(manual_mid)} 元偏离 {margin:+.1%}，判断为{verdict_label}。"
+                    ),
+                }
+            return {
+                "fair_value_range": {
+                    "low": _round(low),
+                    "mid": _round(manual_mid),
+                    "high": _round(high),
+                },
+                "per_method": {},
+                "verdict": verdict,
+                "available_methods": [],
+                "excluded_methods": [],
+                "assumptions": {
+                    "discount_rate": discount_rate,
+                    "terminal_growth": terminal_growth,
+                    "forecast_years": forecast_years,
+                    "target_percentile": target_percentile,
+                    "method_weights": dict(method_weights),
+                    "outlier_band": [outlier_low, outlier_high],
+                    "config_source": config_source,
+                    "config_overrides": list(config_overrides or []),
+                    "manual": True,
+                    "manual_note": note,
+                },
+                "disclaimer": disclaimer,
+                "manual": True,
+                "manual_note": note,
+            }
+
     methods = [
-        relative_valuation(metrics),
-        dcf_valuation(metrics),
-        ddm_valuation(metrics),
+        relative_valuation(metrics, cfg),
+        dcf_valuation(metrics, cfg),
+        ddm_valuation(metrics, cfg),
     ]
     available = [method for method in methods if method.get("available")]
     if not available:
@@ -1187,14 +1574,16 @@ def estimate_fair_value(metrics: dict[str, Any]) -> dict[str, Any]:
                     if not method.get("available")
                 ],
                 "assumptions": {
-                    "discount_rate": DEFAULT_DISCOUNT_RATE,
-                    "terminal_growth": DEFAULT_TERMINAL_GROWTH,
-                    "forecast_years": DEFAULT_FORECAST_YEARS,
-                    "target_percentile": DEFAULT_TARGET_PERCENTILE,
-                    "method_weights": dict(METHOD_WEIGHTS),
-                    "outlier_band": [OUTLIER_LOW_FACTOR, OUTLIER_HIGH_FACTOR],
+                    "discount_rate": discount_rate,
+                    "terminal_growth": terminal_growth,
+                    "forecast_years": forecast_years,
+                    "target_percentile": target_percentile,
+                    "method_weights": dict(method_weights),
+                    "outlier_band": [outlier_low, outlier_high],
+                    "config_source": config_source,
+                    "config_overrides": list(config_overrides or []),
                 },
-                "disclaimer": DISCLAIMER,
+                "disclaimer": disclaimer,
             }
         raise ValueError("没有足够的财务数据计算合理股价估值")
 
@@ -1203,9 +1592,9 @@ def estimate_fair_value(metrics: dict[str, Any]) -> dict[str, Any]:
     kept = [
         method
         for method in available
-        if OUTLIER_LOW_FACTOR * median_price
+        if outlier_low * median_price
         <= float(method["price"])
-        <= OUTLIER_HIGH_FACTOR * median_price
+        <= outlier_high * median_price
     ]
     excluded = [method for method in available if method not in kept]
     if not kept:
@@ -1213,7 +1602,7 @@ def estimate_fair_value(metrics: dict[str, Any]) -> dict[str, Any]:
         excluded = []
 
     weighted_pairs = [
-        (method, METHOD_WEIGHTS.get(method["method"], 1.0)) for method in kept
+        (method, method_weights.get(method["method"], 1.0)) for method in kept
     ]
     low = _weighted_median(
         [(float(method.get("low") or method["price"]), weight) for method, weight in weighted_pairs]
@@ -1235,9 +1624,9 @@ def estimate_fair_value(metrics: dict[str, Any]) -> dict[str, Any]:
         }
     else:
         margin = (current_price - mid) / mid
-        if margin < -VERDICT_BAND:
+        if margin < -verdict_band:
             label = "低估"
-        elif margin > VERDICT_BAND:
+        elif margin > verdict_band:
             label = "高估"
         else:
             label = "合理"
@@ -1272,12 +1661,14 @@ def estimate_fair_value(metrics: dict[str, Any]) -> dict[str, Any]:
             for method in excluded
         ],
         "assumptions": {
-            "discount_rate": DEFAULT_DISCOUNT_RATE,
-            "terminal_growth": DEFAULT_TERMINAL_GROWTH,
-            "forecast_years": DEFAULT_FORECAST_YEARS,
-            "target_percentile": DEFAULT_TARGET_PERCENTILE,
-            "method_weights": dict(METHOD_WEIGHTS),
-            "outlier_band": [OUTLIER_LOW_FACTOR, OUTLIER_HIGH_FACTOR],
+            "discount_rate": discount_rate,
+            "terminal_growth": terminal_growth,
+            "forecast_years": forecast_years,
+            "target_percentile": target_percentile,
+            "method_weights": dict(method_weights),
+            "outlier_band": [outlier_low, outlier_high],
+            "config_source": config_source,
+            "config_overrides": list(config_overrides or []),
         },
-        "disclaimer": DISCLAIMER,
+        "disclaimer": disclaimer,
     }

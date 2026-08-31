@@ -119,6 +119,17 @@ def _fake_run_tool(all_fail: bool = False):
             }
         if name == "get_earnings_forecast":
             return {"symbol": symbol, "research_reports": [], "earnings_guidance": []}
+        if name == "get_model_targets":
+            return {
+                "available": True,
+                "symbol": symbol,
+                "confidence": 0.9,
+                "model_version": "1.0",
+                "report_date": "2026-06-30",
+                "pe": 22.0,
+                "pb": 7.0,
+                "ps": 10.0,
+            }
         if name == "estimate_fair_value":
             return {
                 "fair_value_range": {"low": 1350.0, "mid": 1500.0, "high": 1650.0},
@@ -160,7 +171,11 @@ async def test_handler_produces_analysis_report_section_and_summary(monkeypatch)
     assert payload["analysis"]["industry"] == "白酒"
     assert payload["analysis"]["metrics"]["industry_bench"]["pe"]["median"] == 22.0
     assert payload["analysis"]["valuation"]["fair_value_range"]["mid"] == 1500.0
+    assert payload["analysis"]["model_targets"]["available"] is True
+    assert payload["analysis"]["metrics"]["model_targets"]["pe"] == 22.0
     assert "## 基本面与估值" in payload["report_section"]
+    assert "本地模型参考倍数" in payload["report_section"]
+    assert "置信度 90%" in payload["report_section"]
     assert "低估" in payload["report_section"]
     assert payload["summary"]["valuation_verdict"] == "低估"
     assert payload["summary"]["fair_value_range"]["high"] == 1650.0
@@ -180,6 +195,45 @@ async def test_handler_optional_tool_failure_is_tolerated(monkeypatch):
     payload = json.loads(result)
     assert any("get_industry_valuation_comparison" in warning for warning in payload["analysis"]["warnings"])
     assert "## 基本面与估值" in payload["report_section"]
+
+
+@pytest.mark.asyncio
+async def test_handler_model_unavailable_degrades_gracefully(monkeypatch):
+    async def fake(name, symbol, market_data, warnings, metrics=None):
+        if name == "get_model_targets":
+            return {"available": False, "reason": "模型未训练"}
+        return await _fake_run_tool()(name, symbol, market_data, warnings, metrics)
+
+    monkeypatch.setattr("plugins.stock_fundamental.service.run_tool", fake)
+    monkeypatch.setattr("plugins.stock_fundamental.service.llm_configured", lambda: False)
+    result = await StockFundamentalHandler().run(TaskRequest(query="600519"))
+    payload = json.loads(result)
+    assert payload["analysis"]["model_targets"]["available"] is False
+    assert "本地模型参考倍数" not in payload["report_section"]
+    assert "## 基本面与估值" in payload["report_section"]
+
+
+@pytest.mark.asyncio
+async def test_handler_report_renders_manual_valuation(monkeypatch):
+    async def fake(name, symbol, market_data, warnings, metrics=None):
+        if name == "estimate_fair_value":
+            return {
+                "fair_value_range": {"low": 15.0, "mid": 18.0, "high": 21.0},
+                "verdict": {"label": "高估", "current_price": 21.43, "margin": 0.19},
+                "per_method": {},
+                "available_methods": [],
+                "manual": True,
+                "manual_note": "人工估值区间，待资产并表确认后更新。",
+            }
+        return await _fake_run_tool()(name, symbol, market_data, warnings, metrics)
+
+    monkeypatch.setattr("plugins.stock_fundamental.service.run_tool", fake)
+    monkeypatch.setattr("plugins.stock_fundamental.service.llm_configured", lambda: False)
+    result = await StockFundamentalHandler().run(TaskRequest(query="600519"))
+    payload = json.loads(result)
+    assert "人工估值，待并表确认" in payload["report_section"]
+    assert "待资产并表确认后更新" in payload["report_section"]
+    assert "未纳入" not in payload["report_section"]
 
 
 @pytest.mark.asyncio

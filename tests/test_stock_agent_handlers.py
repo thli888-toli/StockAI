@@ -303,7 +303,8 @@ async def test_stock_analyst_handler_embeds_fundamental_section(monkeypatch):
     fundamental = {
         "report_section": (
             "## 基本面与估值（贵州茅台 600519）\n"
-            "- 合理股价估算（多方法综合）：区间 1000.00–1250.00 元，中枢 1100.00 元。"
+            "- 合理股价估算（多方法综合）：区间 1000.00–1250.00 元，中枢 1100.00 元。\n"
+            "- 参数来源：600519.json（覆盖 discount_rate）。"
         ),
         "summary": {"valuation_verdict": "低估"},
     }
@@ -337,6 +338,7 @@ async def test_stock_analyst_handler_embeds_fundamental_section(monkeypatch):
     )
     assert "## 基本面与估值（贵州茅台 600519）" in result
     assert "中枢 1100.00 元" in result
+    assert "参数来源：600519.json（覆盖 discount_rate）" in result
 
 
 @pytest.mark.asyncio
