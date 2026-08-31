@@ -1,0 +1,18 @@
+{
+  "model_enabled": false,
+  "manual_peers": [
+    { "code": "300124", "name": "汇川技术" },
+    { "code": "300024", "name": "机器人" },
+    { "code": "300607", "name": "拓斯达" },
+    { "code": "688165", "name": "埃夫特" },
+    { "code": "002527", "name": "新时达" },
+    { "code": "603728", "name": "鸣志电器" }
+  ],
+  "model_anchor_weight": 0.15,
+  "method_weights": {
+    "relative": 1.0,
+    "dcf": 0.5,
+    "ddm": 0.5
+  },
+  "discount_rate": 0.08
+}

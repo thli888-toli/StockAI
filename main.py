@@ -32,6 +32,16 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_parser.add_argument("--orchestrator", default=None)
     refresh_parser.add_argument("--db", default=None)
 
+    train_parser = sub.add_parser(
+        "train-valuation-model",
+        help="Train local LightGBM PE/PB/PS target-multiple models from the latest A-share cross-section",
+    )
+    train_parser.add_argument(
+        "--report-date",
+        default=None,
+        help="Explicit report period YYYYMMDD (default: latest available)",
+    )
+
     sub.add_parser("portal", help="Run the portal backend and serve the built UI")
 
     sub.add_parser("stockportal", help="Run the dedicated stock analysis portal")
@@ -42,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
     from framework.runner import run_agent, run_orchestrator, run_portal_backend, run_registry, run_stock_portal, start_all
 
     if args.command == "registry":
@@ -62,6 +77,13 @@ def main() -> int:
             args.orchestrator or ORCHESTRATOR_URL,
             args.db or STOCK_PORTAL_DB,
         )
+    elif args.command == "train-valuation-model":
+        from plugins.stock_fundamental.valuation_model import train
+
+        summary = train(report_date=args.report_date)
+        import json
+
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
     elif args.command == "portal":
         run_portal_backend()
     elif args.command == "stockportal":

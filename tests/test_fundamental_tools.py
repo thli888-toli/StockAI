@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from plugins.stock_fundamental import tools  # noqa: E402
+from plugins.stock_fundamental import config as valuation_config  # noqa: E402
 from plugins.stock_fundamental.fundamental_cache import FundamentalCacheStore  # noqa: E402
 
 
@@ -18,6 +19,69 @@ def _cache(monkeypatch, tmp_path) -> FundamentalCacheStore:
     store = FundamentalCacheStore(tmp_path / "cache.db")
     monkeypatch.setattr(tools, "FUNDAMENTAL_CACHE", store)
     return store
+
+
+@pytest.mark.asyncio
+async def test_get_model_targets_tool_dispatches_with_metrics(monkeypatch):
+    captured = {}
+
+    def fake_model_targets(metrics, symbol="", models_dir=None):
+        captured["metrics"] = metrics
+        captured["symbol"] = symbol
+        captured["models_dir"] = models_dir
+        return {
+            "available": True,
+            "pe": 12.0,
+            "pb": 2.0,
+            "ps": 1.5,
+            "confidence": 0.9,
+            "model_version": "1.0",
+        }
+
+    monkeypatch.setattr(tools, "model_targets_from_metrics", fake_model_targets)
+    result = await tools.run_tool(
+        "get_model_targets",
+        "600519",
+        {},
+        [],
+        metrics={"eps_ttm": 2.0},
+    )
+    assert result["available"] is True
+    assert captured["symbol"] == "600519"
+    assert captured["metrics"] == {"eps_ttm": 2.0}
+
+
+def test_manual_peers_json_priority_over_yaml(monkeypatch, tmp_path):
+    valuation_config.clear_config_cache()
+    monkeypatch.setattr(valuation_config, "CONFIG_DIR", tmp_path)
+    (tmp_path / "default.json").write_text(
+        '{"discount_rate": 0.1}', encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        tools,
+        "MANUAL_PEERS",
+        {"600519": [{"code": "000858", "name": "五粮液"}]},
+    )
+
+    # No JSON key -> YAML fallback
+    assert tools._manual_peers_for_symbol("600519") == [
+        {"code": "000858", "name": "五粮液"}
+    ]
+
+    # JSON manual_peers wins
+    (tmp_path / "600519.json").write_text(
+        '{"manual_peers": [{"code": "600809", "name": "山西汾酒"}]}',
+        encoding="utf-8",
+    )
+    valuation_config.clear_config_cache()
+    peers = tools._manual_peers_for_symbol("600519")
+    assert peers == [{"code": "600809", "name": "山西汾酒"}]
+
+    # Empty JSON manual_peers clears the YAML list
+    (tmp_path / "600519.json").write_text('{"manual_peers": []}', encoding="utf-8")
+    valuation_config.clear_config_cache()
+    assert tools._manual_peers_for_symbol("600519") == []
+    valuation_config.clear_config_cache()
 
 
 class FakeAk:

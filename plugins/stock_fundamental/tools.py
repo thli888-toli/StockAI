@@ -27,8 +27,14 @@ from plugins.stock_common import (
     json_loads,
     run_blocking,
 )
+from plugins.stock_fundamental.config import (
+    load_valuation_config,
+    symbol_manual_peers,
+    symbol_manual_peers_present,
+)
 from plugins.stock_fundamental.fundamental_cache import FundamentalCacheStore
 from plugins.stock_fundamental.valuation import estimate_fair_value
+from plugins.stock_fundamental.valuation_model import model_targets_from_metrics
 
 
 FUNDAMENTAL_CACHE = FundamentalCacheStore()
@@ -50,6 +56,13 @@ def _load_manual_peers(path: str | Path | None = None) -> dict[str, list[Any]]:
 
 
 MANUAL_PEERS = _load_manual_peers()
+
+
+def _manual_peers_for_symbol(symbol: str) -> list[Any]:
+    """Manual peers for a symbol: JSON config wins, YAML is the fallback."""
+    if symbol_manual_peers_present(symbol):
+        return symbol_manual_peers(symbol)
+    return list(MANUAL_PEERS.get(symbol) or [])
 
 
 def _num(value: Any) -> float | None:
@@ -841,7 +854,7 @@ async def _get_industry_valuation_comparison(
         "peer_count": None,
         "matched_industry": "",
     }
-    manual_peers = MANUAL_PEERS.get(symbol)
+    manual_peers = _manual_peers_for_symbol(symbol)
     if manual_peers:
         try:
             stats, peer_list, peer_count = await _fetch_peer_stats(
@@ -1258,8 +1271,26 @@ def _research_reports(frame: pd.DataFrame, limit: int = 5) -> list[dict[str, Any
 # ---------------------------------------------------------------------------
 
 
-def _estimate_fair_value_tool(metrics: dict[str, Any]) -> dict[str, Any]:
-    return estimate_fair_value(metrics)
+def _estimate_fair_value_tool(
+    metrics: dict[str, Any],
+    symbol: str = "",
+) -> dict[str, Any]:
+    cfg, config_source, config_overrides = load_valuation_config(symbol)
+    return estimate_fair_value(
+        metrics,
+        cfg=cfg,
+        config_source=config_source,
+        config_overrides=config_overrides,
+    )
+
+
+def _get_model_targets_tool(
+    metrics: dict[str, Any],
+    symbol: str = "",
+) -> dict[str, Any]:
+    cfg, _, _ = load_valuation_config(symbol)
+    models_dir = cfg.get("model_models_dir") or "state/valuation_model"
+    return model_targets_from_metrics(metrics, symbol=symbol, models_dir=models_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -1315,6 +1346,11 @@ TOOLS: dict[str, dict[str, Any]] = {
         "cache_seconds": 0,
         "func": _estimate_fair_value_tool,
     },
+    "get_model_targets": {
+        "description": "本地LightGBM模型推理：预测合理PE/PB/PS目标倍数（无网络）。",
+        "cache_seconds": 0,
+        "func": _get_model_targets_tool,
+    },
 }
 
 
@@ -1338,8 +1374,8 @@ async def run_tool(
             result = json_loads(cached, {})
             if _cache_shape_valid(name, result):
                 return result
-    if name == "estimate_fair_value":
-        result = func(metrics or {})
+    if name in ("estimate_fair_value", "get_model_targets"):
+        result = func(metrics or {}, symbol)
     else:
         result = await func(symbol, market_data, warnings)
     if not isinstance(result, dict):
