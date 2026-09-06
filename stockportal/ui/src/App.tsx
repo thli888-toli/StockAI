@@ -119,16 +119,20 @@ export default function App() {
     }, 2000);
   };
 
-  const refreshList = useCallback(async () => {
+  const loadMarketList = useCallback(async (target: "a" | "us") => {
     try {
-      const list = await api.listWatchlist(market);
+      const list = await api.listWatchlist(target);
       setItems(list);
     } catch (refreshError) {
       const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
       setError(message);
       if (message.includes("未登录")) setUser(null);
     }
-  }, [market]);
+  }, []);
+
+  const refreshList = useCallback(async () => {
+    await loadMarketList(market);
+  }, [loadMarketList, market]);
 
   useEffect(() => {
     let cancelled = false;
@@ -316,7 +320,7 @@ export default function App() {
     setSymbol("");
     setError("");
     setModal(null);
-    if (user) await refreshList();
+    if (user) await loadMarketList(next);
   };
 
   return (
