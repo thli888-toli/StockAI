@@ -209,7 +209,7 @@ class FakeAk:
             values = [8.0 + index * 0.05 for index in range(100)]
         else:
             values = [10.0 + index * 0.1 for index in range(100)]
-        dates = pd.bdate_range("2024-09-01", periods=100)
+        dates = pd.bdate_range(end=pd.Timestamp.now().normalize(), periods=100)
         return pd.DataFrame({"date": dates, "value": values})
 
     def stock_zh_valuation_comparison_em(self, symbol):
@@ -480,6 +480,75 @@ async def test_manual_peers_fallback_when_all_fail(monkeypatch, fake_ak):
     )
     assert comparison["basis"] == "industry"
     assert comparison["industry"]["pe"]["median"] == 22.0
+
+
+@pytest.mark.asyncio
+async def test_skip_llm_validation_locks_manual_peers(monkeypatch, fake_ak):
+    monkeypatch.setattr(
+        tools,
+        "_manual_peers_for_symbol",
+        lambda symbol: [
+            {"code": "600000", "name": "浦发银行"},
+            {"code": "600009", "name": "上海机场"},
+        ],
+    )
+    monkeypatch.setattr(tools, "_skip_llm_peer_validation", lambda symbol: True)
+    fake_ak.stock_value_em = _llm_peer_value_em
+    fake_ak.stock_zh_valuation_comparison_em = lambda symbol: _auto_peer_frame()
+
+    llm_calls: list[str] = []
+
+    async def fake_llm(symbol, market_data, peers):
+        llm_calls.append(symbol)
+        return {"changed": True, "peers": [{"code": "000858", "name": "五粮液"}]}
+
+    monkeypatch.setattr(tools, "_validate_peers_with_llm", fake_llm)
+    comparison = await tools.run_tool(
+        "get_industry_valuation_comparison",
+        "600519",
+        {"industry": "酒、饮料和精制茶制造业"},
+        [],
+    )
+    assert comparison["source"] == "manual"
+    assert comparison["basis"] == "manual"
+    assert comparison["peer_count"] == 2
+    assert [p["name"] for p in comparison["peers"]["peer_list"]] == [
+        "浦发银行",
+        "上海机场",
+    ]
+    assert llm_calls == []
+
+
+@pytest.mark.asyncio
+async def test_without_skip_flag_eastmoney_overwrites_manual(monkeypatch, fake_ak):
+    monkeypatch.setattr(
+        tools,
+        "_manual_peers_for_symbol",
+        lambda symbol: [
+            {"code": "600000", "name": "浦发银行"},
+            {"code": "600009", "name": "上海机场"},
+        ],
+    )
+    monkeypatch.setattr(tools, "_skip_llm_peer_validation", lambda symbol: False)
+    fake_ak.stock_value_em = _llm_peer_value_em
+    fake_ak.stock_zh_valuation_comparison_em = lambda symbol: _auto_peer_frame()
+
+    llm_calls: list[str] = []
+
+    async def fake_llm(symbol, market_data, peers):
+        llm_calls.append(symbol)
+        return {"changed": False, "reason": "ok"}
+
+    monkeypatch.setattr(tools, "_validate_peers_with_llm", fake_llm)
+    comparison = await tools.run_tool(
+        "get_industry_valuation_comparison",
+        "600519",
+        {"industry": "酒、饮料和精制茶制造业"},
+        [],
+    )
+    # Default behaviour keeps the eastmoney auto peers (manual is overwritten).
+    assert comparison["source"] == "eastmoney"
+    assert llm_calls == ["600519"]
 
 
 def _llm_peer_value_em(symbol):

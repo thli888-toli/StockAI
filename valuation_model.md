@@ -35,7 +35,7 @@
 
 | 参数 | 默认值 | 说明 |
 |---|---|---|
-| `target_percentile` | 0.50 | 龙头分支历史锚使用的自身历史分位：≤0.25 用 p25，≥0.75 用 p75，其余用 p50（默认）。 |
+| `target_percentile` | 0.50 | 历史锚使用的自身历史分位（主路径与龙头分支均生效）：≤0.25 用 p25，≥0.75 用 p75，其余用 p50（默认）。 |
 | `verdict_band` | 0.10 | 低估/合理/高估判定带宽：当前价相对中枢偏离在 ±band 内判"合理"。 |
 | `method_weights` | {relative:1.0, dcf:0.8, ddm:0.5} | 三种方法综合时的权重（加权中位数）。 |
 | `outlier_band` | [0.2, 5.0] | 方法间离群剔除带：某方法价格低于中位数×0.2 或高于×5 时剔除。 |
@@ -65,7 +65,7 @@
 | `restructuring_max_eps` | 0.5 | 重组检测 EPS 上限（盈利高于该值不判重组）。 |
 | `restructuring_min_bps` | 1.0 | 重组检测每股净资产下限（双低才可能判重组）。 |
 | `restructuring_min_sps` | 1.0 | 重组检测每股营收下限（双低才可能判重组）。 |
-| `peer_mismatch_keywords` | ["不匹配","应替换为"] | LLM 校验同行名单时，提示文本命中任一关键词则同行降级为参考。 |
+| `peer_mismatch_keywords` | ["不匹配","应替换为","建议替换为","差异较大","差异明显","不属同类"] | LLM 校验同行名单时，提示文本命中任一关键词则同行降级为参考。 |
 
 ### 手动同行名单
 
@@ -87,6 +87,7 @@
 | `model_min_confidence` | 0.5 | 本地模型最低置信度（特征完整度），低于则不参与估值。 |
 | `model_anchor_weight` | 0.5 | 本地模型目标倍数混入相对估值的权重（普通公司路径）。 |
 | `model_models_dir` | "state/valuation_model" | 模型产物目录（训练数据、模型文件、meta.json）。 |
+| `skip_llm_peer_validation` | false | 设为 true 时跳过该股同行名单的 LLM 校验，并锁定手动名单不被东财自动同行覆盖（`manual_peers` 完全生效）。 |
 
 > 注意：`model_anchor_weight` 设为 0 只会让模型锚"零权重参与"，但仍会占住
 > 截尾均值的排序位置影响剔除结果；要彻底移除模型锚（例如跨行业模型对

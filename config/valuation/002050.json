@@ -1,4 +1,5 @@
 {
+  "model_enabled": false,
   "peg_factor": 1.5,
   "peer_own_premium_factor": 1.3
 }
