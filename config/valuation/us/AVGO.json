@@ -1,0 +1,17 @@
+{
+  "config_version": "1.0",
+  "manual_peers": [
+    {"code": "NVDA", "name": "NVIDIA"},
+    {"code": "AMD", "name": "AMD"},
+    {"code": "QCOM", "name": "Qualcomm"},
+    {"code": "MU", "name": "Micron"},
+    {"code": "MRVL", "name": "Marvell"}
+  ],
+  "max_growth": 0.50,
+  "discount_rate": 0.10,
+  "sensitivity_rates": [0.08, 0.12],
+  "terminal_growth": 0.02,
+  "leader_forward_pe": 30.0,
+  "leader_pb_enabled": false,
+  "leader_use_ttm_pe_history": false
+}

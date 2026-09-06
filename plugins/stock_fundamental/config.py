@@ -49,11 +49,17 @@ _FLOAT_KEYS = {
     "peer_own_premium_factor",
     "model_min_confidence",
     "model_anchor_weight",
+    "leader_forward_pe",
     "leader_primary_min_weight",
     "growth_cagr_weight",
     "ddm_growth_cap",
 }
-_BOOL_KEYS = {"model_enabled"}
+_BOOL_KEYS = {
+    "model_enabled",
+    "skip_llm_peer_validation",
+    "leader_pb_enabled",
+    "leader_use_ttm_pe_history",
+}
 _STR_KEYS = {
     "config_version",
     "model_models_dir",

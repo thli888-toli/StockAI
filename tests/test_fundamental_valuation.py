@@ -827,3 +827,29 @@ def test_estimate_fair_value_weighted_mean_applies_method_weights():
     assert result["fair_value_range"]["mid"] == pytest.approx(expected_mid, abs=0.01)
     assert result["fair_value_range"]["low"] <= result["fair_value_range"]["mid"]
     assert result["fair_value_range"]["mid"] <= result["fair_value_range"]["high"]
+
+
+def test_growth_leader_manual_forward_pe_anchor():
+    """A configured forward PE can replace distorted TTM/PB anchors."""
+    metrics = _metrics(
+        eps_ttm=1.0,
+        bps=5.0,
+        forecast_eps=10.0,
+        forecast_year=2027,
+        forecast_growth=0.6,
+        industry_peers={},
+        industry_bench={},
+    )
+    result = relative_valuation(
+        metrics,
+        cfg={
+            "leader_forward_pe": 25.0,
+            "leader_pb_enabled": False,
+            "leader_use_ttm_pe_history": False,
+        },
+    )
+    assert result["available"] is True
+    assert result["price"] == pytest.approx(250.0, abs=0.01)
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert "pe_ttm_fwd_leader" in detail
+    assert detail["pe_ttm_fwd_leader"]["target_source"] == "个股配置目标前瞻PE"

@@ -331,6 +331,11 @@ def _growth_leader_relative(
     forecast_year = metrics.get("forecast_year")
     current_price = _num(metrics.get("current_price"))
     forward_pe = _resolve_forward_pe(peers, forecast_year)
+    manual_forward_pe = _cfg_float(cfg, "leader_forward_pe", 0.0)
+    forward_pe_is_manual = False
+    if forward_pe is None and manual_forward_pe > 0:
+        forward_pe = manual_forward_pe
+        forward_pe_is_manual = True
     growth_leader_threshold = _cfg_float(
         cfg, "growth_leader_threshold", GROWTH_LEADER_THRESHOLD
     )
@@ -350,6 +355,10 @@ def _growth_leader_relative(
     )
     leader_primary_min_weight = _cfg_float(
         cfg, "leader_primary_min_weight", 1.0
+    )
+    leader_pb_enabled = bool(cfg.get("leader_pb_enabled", True))
+    leader_use_ttm_pe_history = bool(
+        cfg.get("leader_use_ttm_pe_history", True)
     )
     has_forward = (
         forward_eps is not None
@@ -497,7 +506,11 @@ def _growth_leader_relative(
                         "name": "PE(forward 龙头主锚)",
                         "base": _round(forward_eps),
                         "target_multiple": _round(forward_pe),
-                        "target_source": "类似公司中位数(forward PE)",
+                        "target_source": (
+                            "个股配置目标前瞻PE"
+                            if forward_pe_is_manual
+                            else "类似公司中位数(forward PE)"
+                        ),
                         "implied_price": _round(fwd_implied),
                         "implied_low": _round(fwd_implied * (1.0 - target_band)),
                         "implied_high": _round(fwd_implied * (1.0 + target_band)),
@@ -505,7 +518,12 @@ def _growth_leader_relative(
                     },
                 ),
             )
-        if bps is not None and bps > 0 and pb_anchor is not None:
+        if (
+            leader_pb_enabled
+            and bps is not None
+            and bps > 0
+            and pb_anchor is not None
+        ):
             pb_implied = bps * pb_anchor
             estimates.append(
                 (
@@ -526,18 +544,20 @@ def _growth_leader_relative(
                     },
                 ),
             )
-        add_own_history_anchor(
-            "pe_ttm",
-            eps_ttm,
-            leader_history_weight,
-            forward_pe * leader_history_cap_factor,
-        )
-        add_own_history_anchor(
-            "pb",
-            bps,
-            leader_history_weight,
-            pb_anchor * leader_history_cap_factor if pb_anchor else None,
-        )
+        if leader_use_ttm_pe_history:
+            add_own_history_anchor(
+                "pe_ttm",
+                eps_ttm,
+                leader_history_weight,
+                forward_pe * leader_history_cap_factor,
+            )
+        if leader_pb_enabled:
+            add_own_history_anchor(
+                "pb",
+                bps,
+                leader_history_weight,
+                pb_anchor * leader_history_cap_factor if pb_anchor else None,
+            )
     else:
         add_own_history_anchor("pe_ttm", eps_ttm, 1.0)
         add_own_history_anchor("pb", bps, 1.0)
