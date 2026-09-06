@@ -1,0 +1,15 @@
+apiVersion: agent-framework/v1
+kind: Agent
+name: us_validator
+version: 1.0.0
+description: Validates US-stock fair-value estimates with an LLM (deterministic fallback) without changing the numbers.
+entrypoint: service:build_agent
+port: 8028
+capabilities:
+  streaming: false
+inputs:
+  query: string
+  market_data: optional<string>
+  fundamental: optional<string>
+outputs:
+  artifact: string

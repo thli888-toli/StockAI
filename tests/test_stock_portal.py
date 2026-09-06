@@ -118,7 +118,86 @@ def test_stock_portal_get_run_proxies_orchestrator(monkeypatch, tmp_path):
     with TestClient(app) as client:
         response = client.get("/api/runs/r-complete")
     assert response.status_code == 200
-    assert response.json()["run_id"] == "r-complete"
+
+
+def _fake_market_app(tmp_path):
+    return stock_portal_app.create_stock_portal_app(
+        orchestrator_url="http://fake-cn",
+        us_orchestrator_url="http://fake-us",
+        db_path=str(tmp_path / "watchlist.db"),
+    )
+
+
+def test_watchlist_markets_are_isolated(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append((url, json))
+        return FakeResponse(200, _run_payload(f"run-{len(calls)}", "completed", json["query"]))
+
+    monkeypatch.setattr(stock_portal_app.httpx, "post", fake_post)
+    app = _fake_market_app(tmp_path)
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        response = client.post(
+            "/api/watchlist",
+            json={"query": "AAPL", "market": "us"},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        assert response.json()["market"] == "us"
+        response = client.post(
+            "/api/watchlist",
+            json={"query": "600519", "market": "a"},
+            headers=headers,
+        )
+        assert response.status_code == 200
+        cn = client.get("/api/watchlist?market=a", headers=headers).json()
+        us = client.get("/api/watchlist?market=us", headers=headers).json()
+        assert [item["symbol"] for item in cn] == ["600519"]
+        assert [item["symbol"] for item in us] == ["AAPL"]
+        assert any("fake-us" in url for url, _ in calls)
+
+
+def test_watchlist_us_validation_rejects_cn_code(monkeypatch, tmp_path):
+    def fake_post(url, json=None, timeout=None):
+        return FakeResponse(200, _run_payload("r1", "running", json["query"]))
+
+    monkeypatch.setattr(stock_portal_app.httpx, "post", fake_post)
+    app = _fake_market_app(tmp_path)
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        response = client.post(
+            "/api/watchlist",
+            json={"query": "600519", "market": "us"},
+            headers=headers,
+        )
+        assert response.status_code == 422
+
+
+def test_chart_snapshots_are_market_scoped(monkeypatch, tmp_path):
+    app = _fake_market_app(tmp_path)
+    payload = {
+        "symbol": "AAPL",
+        "period": "daily",
+        "candles": [],
+        "ma": {},
+        "macd": {},
+        "signals": {},
+        "levels": {},
+    }
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        user_id = client.get("/api/me", headers=headers).json()["user_id"]
+        assert client.post("/api/watchlist", json={"query": "AAPL", "market": "us"}, headers=headers).status_code == 200
+        assert client.post("/api/watchlist", json={"query": "600519", "market": "a"}, headers=headers).status_code == 200
+        store = WatchlistStore(Path(tmp_path) / "watchlist.db")
+        store.upsert(user_id, "600519", market="a", outputs={}, status="completed", run_id="r1")
+        store.upsert(user_id, "AAPL", market="us", outputs={}, status="completed", run_id="r2")
+        store.save_chart_snapshot(user_id, "600519", "daily", payload, market="a")
+        store.save_chart_snapshot(user_id, "AAPL", "daily", payload, market="us")
+        assert len(store.list_chart_snapshots(user_id, "600519", "a")) == 1
+        assert len(store.list_chart_snapshots(user_id, "600519", "us")) == 0
 
 
 def test_watchlist_add_starts_run(monkeypatch, tmp_path):

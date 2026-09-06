@@ -12,6 +12,7 @@ type User = { user_id: string; openid: string; nickname: string; avatar: string 
 
 
 export default function App() {
+  const [market, setMarket] = useState<"a" | "us">("a");
   const [symbol, setSymbol] = useState("");
   const [items, setItems] = useState<WatchlistItem[]>([]);
   const [error, setError] = useState("");
@@ -41,7 +42,7 @@ export default function App() {
     setHistoryError("");
     setSelectedSnapshotId("");
     api
-      .listChartSnapshots(modal.item.symbol)
+      .listChartSnapshots(modal.item.symbol, market)
       .then((list) => {
         if (!cancelled) setChartSnapshots(list);
       })
@@ -53,7 +54,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [modal]);
+  }, [modal, market]);
 
   const loadHistory = async (value: string) => {
     setSelectedSnapshotId(value);
@@ -64,7 +65,7 @@ export default function App() {
     }
     const snapshotId = Number(value);
     try {
-      const snapshot = await api.getChartSnapshot(modal!.item.symbol, snapshotId);
+      const snapshot = await api.getChartSnapshot(modal!.item.symbol, snapshotId, market);
       setHistoryPayload(snapshot.payload as ChartPayload);
     } catch (err) {
       setHistoryPayload(null);
@@ -77,7 +78,7 @@ export default function App() {
     const snapshotId = Number(selectedSnapshotId);
     setHistoryError("");
     try {
-      await api.deleteChartSnapshot(modal!.item.symbol, snapshotId);
+      await api.deleteChartSnapshot(modal!.item.symbol, snapshotId, market);
       setChartSnapshots((prev) => prev.filter((item) => item.id !== snapshotId));
       if (historyPayload && snapshotId === Number(selectedSnapshotId)) {
         setHistoryPayload(null);
@@ -93,9 +94,9 @@ export default function App() {
     setChartSaveMessage("");
     setChartSaving(true);
     try {
-      await api.saveChart(modal.item.symbol, chartPeriod);
+      await api.saveChart(modal.item.symbol, chartPeriod, market);
       setChartSaveMessage("已保存");
-      const list = await api.listChartSnapshots(modal.item.symbol);
+      const list = await api.listChartSnapshots(modal.item.symbol, market);
       setChartSnapshots(list);
     } catch (err) {
       setHistoryError(err instanceof Error ? err.message : String(err));
@@ -120,14 +121,14 @@ export default function App() {
 
   const refreshList = useCallback(async () => {
     try {
-      const list = await api.listWatchlist();
+      const list = await api.listWatchlist(market);
       setItems(list);
     } catch (refreshError) {
       const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
       setError(message);
       if (message.includes("未登录")) setUser(null);
     }
-  }, []);
+  }, [market]);
 
   useEffect(() => {
     let cancelled = false;
@@ -163,14 +164,22 @@ export default function App() {
 
   const submit = async () => {
     const code = symbol.trim();
-    if (!/^\d{6}$/.test(code)) {
-      setError("请输入 6 位 A 股代码，例如 600519。");
+    const usPattern = /^[A-Za-z][A-Za-z0-9]{0,9}([.\-][A-Za-z0-9]{1,2})?$/;
+    const valid = market === "us"
+      ? usPattern.test(code)
+      : /^\d{6}$/.test(code);
+    if (!valid) {
+      setError(
+        market === "us"
+          ? "请输入美股代码，例如 AAPL 或 BRK.B。"
+          : "请输入 6 位 A 股代码，例如 600519。"
+      );
       return;
     }
     setError("");
     setLoading(true);
     try {
-      const item = await api.addWatchlist(code);
+      const item = await api.addWatchlist(code.toUpperCase(), market);
       if ("already_exists" in item) {
         setError(item.message);
         return;
@@ -210,7 +219,7 @@ export default function App() {
   const refreshItem = async (code: string) => {
     setError("");
     try {
-      const item = await api.refreshWatchlist(code);
+      const item = await api.refreshWatchlist(code, market);
       if ("already_generated" in item) {
         setError(item.message);
         return;
@@ -228,7 +237,7 @@ export default function App() {
   const removeItem = async (code: string) => {
     setError("");
     try {
-      await api.removeWatchlist(code);
+      await api.removeWatchlist(code, market);
       setItems((prev) => prev.filter((existing) => existing.symbol !== code));
     } catch (removeError) {
       setError(removeError instanceof Error ? removeError.message : String(removeError));
@@ -238,7 +247,7 @@ export default function App() {
   const saveTags = async (item: WatchlistItem, nextTags: string[]) => {
     setError("");
     try {
-      const updated = await api.updateTags(item.symbol, nextTags);
+      const updated = await api.updateTags(item.symbol, nextTags, market);
       setItems((prev) =>
         prev.map((existing) => (existing.symbol === updated.symbol ? updated : existing))
       );
@@ -301,9 +310,33 @@ export default function App() {
     return rawReport;
   })();
 
+  const switchMarket = async (next: "a" | "us") => {
+    if (next === market) return;
+    setMarket(next);
+    setSymbol("");
+    setError("");
+    setModal(null);
+    if (user) await refreshList();
+  };
+
   return (
     <main className="app">
-      <h1>A 股分析门户</h1>
+      <h1>股票分析门户</h1>
+
+      <div className="market-tabs">
+        <button
+          className={market === "a" ? "active" : ""}
+          onClick={() => void switchMarket("a")}
+        >
+          A 股
+        </button>
+        <button
+          className={market === "us" ? "active" : ""}
+          onClick={() => void switchMarket("us")}
+        >
+          美股
+        </button>
+      </div>
 
       <section className="card">
         {user ? (
@@ -332,8 +365,8 @@ export default function App() {
           <input
             value={symbol}
             onChange={(event) => setSymbol(event.target.value)}
-            placeholder="600519"
-            maxLength={6}
+            placeholder={market === "us" ? "AAPL" : "600519"}
+            maxLength={market === "us" ? 12 : 6}
           />
           <button onClick={submit} disabled={loading}>
             {loading ? "提交中..." : "分析"}
@@ -343,7 +376,7 @@ export default function App() {
       </section>
 
       <section className="card">
-        <h2>监控列表</h2>
+        <h2>{market === "us" ? "美股监控列表" : "A 股监控列表"}</h2>
         <div className="watchlist-toolbar">
           <input
             value={tagQuery}
@@ -530,13 +563,14 @@ export default function App() {
                           <h3>当前 K线图</h3>
                           <StockChart
                             symbol={modal.item.symbol}
+                            market={market}
                             period={chartPeriod}
                             onPeriodChange={setChartPeriod}
                             hideHeader
                           />
                         </>
                       ) : (
-                        <StockChart symbol={modal.item.symbol} />
+                        <StockChart symbol={modal.item.symbol} market={market} />
                       )}
                     </div>
                     {historyPayload && (

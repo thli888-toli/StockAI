@@ -51,3 +51,28 @@ def test_completed_and_failed_runs_are_untouched(tmp_path):
     store.mark_orphaned_running_runs_failed(known_run_ids=set())
     assert store.get_run("r1")["status"] == "completed"
     assert store.get_run("r2")["status"] == "failed"
+
+
+def test_portal_store_keeps_graphs_per_market(tmp_path):
+    store = PortalStore(tmp_path / "portal.db")
+    store.set_graph("a", {"name": "stock_analysis", "nodes": {}, "edges": []})
+    store.set_graph("us", {"name": "us_stock_analysis", "nodes": {}, "edges": []})
+    store.set_graph_configs("a", [{"name": "orchestration.yaml", "active": True}])
+    store.set_graph_configs(
+        "us",
+        [{"name": "orchestration_us.yaml", "active": True}],
+    )
+    assert store.get_graph("a")["name"] == "stock_analysis"
+    assert store.get_graph("us")["name"] == "us_stock_analysis"
+    assert [item["name"] for item in store.get_graph_configs("us")] == [
+        "orchestration_us.yaml"
+    ]
+
+
+def test_portal_store_runs_carry_market(tmp_path):
+    store = PortalStore(tmp_path / "portal.db")
+    store.upsert_run({**_run("r-us", "running", "2026-08-26T00:00:00+00:00"), "market": "us"})
+    store.mark_orphaned_running_runs_failed(known_run_ids={"r-us"}, market="us")
+    assert store.get_run("r-us")["status"] == "running"
+    store.mark_orphaned_running_runs_failed(known_run_ids=set(), market="us")
+    assert store.get_run("r-us")["status"] == "failed"

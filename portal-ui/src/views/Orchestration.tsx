@@ -50,6 +50,7 @@ function layoutGraph(graph: GraphData) {
 }
 
 export default function Orchestration({ runs }: { runs: RunSummary[] }) {
+  const [market, setMarket] = useState<"a" | "us">("a");
   const [graph, setGraph] = useState<GraphData | null>(null);
   const [configs, setConfigs] = useState<GraphConfig[]>([]);
   const [selectedConfig, setSelectedConfig] = useState("");
@@ -68,10 +69,22 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
   const activeRunId = selectedRun?.run_id ?? "";
 
   useEffect(() => {
+    setGraph(null);
+    setConfigs([]);
+    setSelectedConfig("");
+    setRunFilter("");
+    setSelectedRunId("");
+    setSelectedNode(null);
+  }, [market]);
+
+  useEffect(() => {
     let alive = true;
     const refresh = async () => {
       try {
-        const [data, nextConfigs] = await Promise.all([api.graph(), api.graphConfigs()]);
+        const [data, nextConfigs] = await Promise.all([
+          api.graph(market),
+          api.graphConfigs(market)
+        ]);
         if (alive) {
           setGraph(data);
           setConfigs(nextConfigs);
@@ -88,7 +101,7 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
       alive = false;
       window.clearInterval(id);
     };
-  }, []);
+  }, [market]);
 
   useEffect(() => {
     if (!selectedNode || !activeRunId) return;
@@ -133,9 +146,9 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
     setWaiting(false);
     setApplying(true);
     try {
-      const nextConfigs = await api.applyGraphConfig(selectedConfig);
+      const nextConfigs = await api.applyGraphConfig(selectedConfig, market);
       setConfigs(nextConfigs);
-      const data = await api.graph();
+      const data = await api.graph(market);
       setGraph(data);
     } catch (error) {
       console.error(error);
@@ -147,7 +160,7 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
   const cancelSelectedRun = async () => {
     if (!selectedRun) return;
     try {
-      await api.cancelRun(selectedRun.run_id);
+      await api.cancelRun(selectedRun.run_id, selectedRun.market || market);
     } catch (error) {
       console.error(error);
     }
@@ -208,6 +221,20 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
   return (
     <section className="card">
       <h2>Orchestration Graph</h2>
+      <div className="controls">
+        <button
+          className={market === "a" ? "active" : ""}
+          onClick={() => setMarket("a")}
+        >
+          A 股
+        </button>
+        <button
+          className={market === "us" ? "active" : ""}
+          onClick={() => setMarket("us")}
+        >
+          美股
+        </button>
+      </div>
       <div className="controls">
         <select value={selectedConfig} onChange={(event) => setSelectedConfig(event.target.value)}>
           {configs.map((config) => (

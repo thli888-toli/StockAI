@@ -27,11 +27,12 @@ from typing import Any
 
 import httpx
 
-from framework.config import ORCHESTRATOR_URL, STOCK_PORTAL_DB
+from framework.config import ORCHESTRATOR_URL, STOCK_PORTAL_DB, US_ORCHESTRATOR_URL
 from stockportal.store import WatchlistStore
 
 
 SYMBOL_RE = re.compile(r"^\d{6}$")
+US_SYMBOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,9}([.\-][A-Za-z0-9]{1,2})?$")
 TERMINAL_STATUSES = ("completed", "failed")
 SYMBOL_SEPARATOR_RE = re.compile(r"[,，、\s]+")
 MAX_POLL_FAILURES = 3
@@ -129,12 +130,16 @@ def poll_runs(
             time.sleep(poll_interval)
 
 
-def distinct_watchlist_symbols(db_path: str | Path) -> list[str]:
+def distinct_watchlist_symbols(
+    db_path: str | Path,
+    market: str = "a",
+) -> list[str]:
     """Return every distinct symbol in the watchlist DB across all users."""
     store = WatchlistStore(db_path)
     with store.lock, store.conn:
         rows = store.conn.execute(
-            "SELECT DISTINCT symbol FROM watchlist ORDER BY symbol"
+            "SELECT DISTINCT symbol FROM watchlist WHERE market=? ORDER BY symbol",
+            (market,),
         ).fetchall()
     return [str(row["symbol"]) for row in rows]
 
@@ -143,6 +148,7 @@ def refresh_symbol_reports(
     symbols: list[str],
     orchestrator_url: str = ORCHESTRATOR_URL,
     db_path: str | Path = STOCK_PORTAL_DB,
+    market: str = "a",
 ) -> list[dict[str, Any]]:
     """Submit one orchestrator run per symbol and return immediately.
 
@@ -153,13 +159,17 @@ def refresh_symbol_reports(
     store = WatchlistStore(db_path)
     results_by_symbol: dict[str, dict[str, Any]] = {}
     valid_symbols: list[str] = []
+    symbol_re = US_SYMBOL_RE if market == "us" else SYMBOL_RE
+    label = "US ticker" if market == "us" else "6-digit A-share code"
     for raw_symbol in symbols:
         symbol = str(raw_symbol or "").strip()
-        if not SYMBOL_RE.fullmatch(symbol):
+        if market == "us":
+            symbol = symbol.upper()
+        if not symbol_re.fullmatch(symbol):
             results_by_symbol[symbol] = {
                 "symbol": symbol,
                 "status": "failed",
-                "error": "symbol must be a 6-digit A-share code",
+                "error": f"symbol must be a valid {label}",
                 "run_id": None,
                 "updated_rows": 0,
             }
@@ -173,9 +183,12 @@ def refresh_symbol_reports(
         if run:
             updated_rows = 0
             for row in store.all_by_symbol(symbol):
+                if row.get("market", "a") != market:
+                    continue
                 store.upsert(
                     row["user_id"],
                     symbol,
+                    market=market,
                     run_id=run.get("run_id"),
                     status=str(run.get("status") or "queued"),
                     error=run.get("error"),
@@ -208,11 +221,12 @@ def run_cli(
     refresh_all: bool,
     orchestrator_url: str,
     db_path: str | Path,
+    market: str = "a",
 ) -> int:
     if refresh_all:
-        symbol_list = distinct_watchlist_symbols(db_path)
+        symbol_list = distinct_watchlist_symbols(db_path, market)
         if not symbol_list:
-            print("no watchlist symbols found, nothing to refresh")
+            print(f"no watchlist symbols found for market '{market}', nothing to refresh")
             return 0
     else:
         symbol_list = [
@@ -225,6 +239,7 @@ def run_cli(
         symbol_list,
         orchestrator_url=orchestrator_url,
         db_path=db_path,
+        market=market,
     )
     failed = 0
     for item in results:
@@ -254,6 +269,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Refresh every distinct symbol registered in the watchlist DB across all users",
     )
+    parser.add_argument(
+        "--market",
+        choices=("a", "us"),
+        default="a",
+        help="Market to refresh: 'a' for A-share (default), 'us' for US stocks",
+    )
     parser.add_argument("--orchestrator", default=ORCHESTRATOR_URL)
     parser.add_argument("--db", default=str(STOCK_PORTAL_DB))
     return parser
@@ -267,8 +288,9 @@ def main(argv: list[str] | None = None) -> int:
     return run_cli(
         args.symbols,
         args.all,
-        args.orchestrator,
+        US_ORCHESTRATOR_URL if args.market == "us" else args.orchestrator,
         args.db,
+        args.market,
     )
 
 

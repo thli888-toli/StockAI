@@ -219,6 +219,41 @@ def test_quant_payload_ensembles_lstm_and_lightgbm(monkeypatch):
     assert data["weekly_backtest"]["sample_count"] == 0
 
 
+def test_us_orchestration_manifest_compiles():
+    manifest_path = ROOT / "config" / "orchestration_us.yaml"
+    data = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest = GraphManifest.model_validate(data)
+    assert manifest.entry == "us_data"
+    assert set(manifest.nodes) == {"us_data", "us_fundamental", "us_validator"}
+
+
+def test_two_orchestrators_use_separate_queues(tmp_path):
+    from framework.orchestrator import Orchestrator
+
+    cn = Orchestrator(
+        manifest_path=str(ROOT / "config" / "orchestration.yaml"),
+        queue_db=str(tmp_path / "cn_queue.db"),
+        checkpoint_db=str(tmp_path / "cn_checkpoint.db"),
+    )
+    us = Orchestrator(
+        manifest_path=str(ROOT / "config" / "orchestration_us.yaml"),
+        queue_db=str(tmp_path / "us_queue.db"),
+        checkpoint_db=str(tmp_path / "us_checkpoint.db"),
+    )
+    try:
+        cn._run_queue.enqueue("r-cn", "600519", None, "orchestration.yaml")
+        us._run_queue.enqueue("r-us", "AAPL", None, "orchestration_us.yaml")
+        cn_items = cn._run_queue.list_items()
+        us_items = us._run_queue.list_items()
+        assert len(cn_items) == 1 and cn_items[0]["run_id"] == "r-cn"
+        assert cn_items[0]["graph_config"] == "orchestration.yaml"
+        assert len(us_items) == 1 and us_items[0]["run_id"] == "r-us"
+        assert us_items[0]["graph_config"] == "orchestration_us.yaml"
+    finally:
+        asyncio.run(cn.close())
+        asyncio.run(us.close())
+
+
 def test_monthly_signal_combines_macd_and_ma():
     from plugins.stock_quant import service as quant_service
 

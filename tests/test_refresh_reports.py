@@ -286,7 +286,7 @@ def test_poll_runs_survives_transient_poll_failures(monkeypatch):
 def test_run_cli_parses_symbols_and_exit_codes(monkeypatch, tmp_path):
     captured: dict = {}
 
-    def fake_refresh(symbols, orchestrator_url=None, db_path=None):
+    def fake_refresh(symbols, orchestrator_url=None, db_path=None, market="a"):
         captured["symbols"] = symbols
         return [
             {"symbol": "600519", "status": "submitted", "run_id": "r1"},
@@ -301,7 +301,7 @@ def test_run_cli_parses_symbols_and_exit_codes(monkeypatch, tmp_path):
     monkeypatch.setattr(
         refresh_reports,
         "refresh_symbol_reports",
-        lambda symbols, orchestrator_url=None, db_path=None: [
+        lambda symbols, orchestrator_url=None, db_path=None, market="a": [
             {"symbol": "600519", "status": "submitted", "run_id": "r1"}
         ],
     )
@@ -311,7 +311,7 @@ def test_run_cli_parses_symbols_and_exit_codes(monkeypatch, tmp_path):
 def test_run_cli_accepts_chinese_comma_and_dunhao(monkeypatch, tmp_path):
     captured: dict = {}
 
-    def fake_refresh(symbols, orchestrator_url=None, db_path=None):
+    def fake_refresh(symbols, orchestrator_url=None, db_path=None, market="a"):
         captured["symbols"] = symbols
         return []
 
@@ -326,7 +326,7 @@ def test_run_cli_all_refreshes_distinct_symbols(monkeypatch, tmp_path):
     store.upsert("user-c", "600110", status="failed", outputs={})
     captured: dict = {}
 
-    def fake_refresh(symbols, orchestrator_url=None, db_path=None):
+    def fake_refresh(symbols, orchestrator_url=None, db_path=None, market="a"):
         captured["symbols"] = symbols
         return [
             {
@@ -347,7 +347,7 @@ def test_run_cli_all_with_empty_db_does_nothing(monkeypatch, tmp_path):
     db_path = tmp_path / "empty.db"
     called = []
 
-    def fake_refresh(symbols, orchestrator_url):
+    def fake_refresh(symbols, orchestrator_url, db_path=None, market="a"):
         called.append(symbols)
         return []
 
