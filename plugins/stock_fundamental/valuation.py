@@ -416,24 +416,27 @@ def _growth_leader_relative(
         if anchor_value is None or anchor_value <= 0:
             return
         multiple = anchor_value
-        if key == "pe_ttm":
+        if key == "pe_ttm" and weight >= 1.0:
             current_pe = _num((metrics.get("valuation") or {}).get("pe_ttm"))
-            peer_pe = _num((peers.get("pe") or {}).get("median"))
-            pe_candidates = [
-                value
-                for value in (multiple, peer_pe)
-                if value is not None and value > 0
-            ]
+            # 周期景气保护只跟自身历史锚比较，避免同行名单刷新导致的阈值漂移；
+            # 仅当自身历史锚缺失时才回退到同行中位数。
+            anchor_candidates = (
+                [multiple] if multiple is not None and multiple > 0 else []
+            )
+            if not anchor_candidates:
+                peer_pe = _num((peers.get("pe") or {}).get("median"))
+                if peer_pe is not None and peer_pe > 0:
+                    anchor_candidates = [peer_pe]
             if (
                 current_pe is not None
                 and current_pe > 0
-                and pe_candidates
-                and current_pe <= cyclical_boom_pe_ratio * min(pe_candidates)
+                and anchor_candidates
+                and current_pe <= cyclical_boom_pe_ratio * min(anchor_candidates)
             ):
                 percentile_label = {0.25: "25", 0.5: "50", 0.75: "75"}[quantile]
                 notes.append(
                     f"当前PE {current_pe:.2f} 显著低于自身历史{percentile_label}分位"
-                    f"（≤ {min(pe_candidates):.2f} × {cyclical_boom_pe_ratio:.0%}），"
+                    f"（≤ {min(anchor_candidates):.2f} × {cyclical_boom_pe_ratio:.0%}），"
                     "疑似周期景气高点盈利，龙头分支弃用 PE 历史锚，改用 PB。"
                 )
                 return
@@ -696,6 +699,9 @@ def relative_valuation(
     )
     history_cap = _cfg_float(cfg, "history_cap", HISTORY_CAP)
     history_weight = _cfg_float(cfg, "history_weight", HISTORY_WEIGHT)
+    target_percentile = _cfg_float(
+        cfg, "target_percentile", DEFAULT_TARGET_PERCENTILE
+    )
     metric_outlier_factor = _cfg_float(
         cfg, "metric_outlier_factor", METRIC_OUTLIER_FACTOR
     )
@@ -802,6 +808,20 @@ def relative_valuation(
         hist_p50 = _num(hist.get("p50"))
         hist_p25 = _num(hist.get("p25"))
         hist_p75 = _num(hist.get("p75"))
+        hist_quantile = (
+            0.25
+            if target_percentile <= 0.25
+            else 0.75
+            if target_percentile >= 0.75
+            else 0.5
+        )
+        hist_anchor = {0.25: hist_p25, 0.5: hist_p50, 0.75: hist_p75}[
+            hist_quantile
+        ]
+        if hist_anchor is None or hist_anchor <= 0:
+            hist_anchor = hist_p50
+        hist_pct_label = {0.25: "25", 0.5: "50", 0.75: "75"}[hist_quantile]
+        hist_source_label = f"自身历史{hist_pct_label}分位"
         pe_history_unusable = (
             key == "pe_ttm"
             and hist_p25 is not None
@@ -865,19 +885,19 @@ def relative_valuation(
                 continue
 
         if loss_making:
-            if key == "pb" and hist_p50 is not None and hist_p50 > 0:
-                implied = base * hist_p50
+            if key == "pb" and hist_anchor is not None and hist_anchor > 0:
+                implied = base * hist_anchor
                 multiple_low = min(
                     hist_p25
                     if hist_p25 is not None and hist_p25 > 0
-                    else hist_p50 * (1.0 - target_band),
-                    hist_p50,
+                    else hist_anchor * (1.0 - target_band),
+                    hist_anchor,
                 )
                 multiple_high = max(
                     hist_p75
                     if hist_p75 is not None and hist_p75 > 0
-                    else hist_p50 * (1.0 + target_band),
-                    hist_p50,
+                    else hist_anchor * (1.0 + target_band),
+                    hist_anchor,
                 )
                 estimates.append(
                     (
@@ -889,8 +909,8 @@ def relative_valuation(
                             "metric": "pb_hist",
                             "name": "PB(自身历史)",
                             "base": _round(base),
-                            "target_multiple": _round(hist_p50),
-                            "target_source": "自身历史50分位",
+                            "target_multiple": _round(hist_anchor),
+                            "target_source": hist_source_label,
                             "implied_price": _round(implied),
                             "implied_low": _round(base * multiple_low),
                             "implied_high": _round(base * multiple_high),
@@ -950,18 +970,22 @@ def relative_valuation(
             and current_multiple > 0
             and current_multiple > peers_median * peer_own_premium_factor
         ):
-            if hist_p50 is not None and hist_p50 > 0 and hist_p50 > peers_median:
-                target = hist_p50
-                source = "自身历史50分位"
+            if (
+                hist_anchor is not None
+                and hist_anchor > 0
+                and hist_anchor > peers_median
+            ):
+                target = hist_anchor
+                source = hist_source_label
                 notes.append(
                     f"同行{peer_key.upper()}中位数 {peers_median:.2f} 显著低于自身当前"
-                    f"{names[key]} {current_multiple:.2f}，采用自身历史50分位 "
-                    f"{hist_p50:.2f} 作为{names[key]}锚。"
+                    f"{names[key]} {current_multiple:.2f}，采用{hist_source_label} "
+                    f"{hist_anchor:.2f} 作为{names[key]}锚。"
                 )
             else:
                 notes.append(
                     f"同行{peer_key.upper()}中位数 {peers_median:.2f} 显著低于自身当前"
-                    f"{names[key]} {current_multiple:.2f} 且缺少自身历史分位，"
+                    f"{names[key]} {current_multiple:.2f} 且缺少可用自身历史分位，"
                     f"弃用{names[key]}口径。"
                 )
                 continue
@@ -970,11 +994,11 @@ def relative_valuation(
             if (
                 peers_low_confidence
                 and not pe_history_unusable
-                and hist_p50 is not None
-                and hist_p50 > 0
+                and hist_anchor is not None
+                and hist_anchor > 0
             ):
-                target = hist_p50
-                source = "自身历史50分位"
+                target = hist_anchor
+                source = hist_source_label
             elif industry_median is not None and industry_median > 0:
                 target = industry_median
                 source = "行业整体中位数"
@@ -1001,12 +1025,12 @@ def relative_valuation(
                 target = peers_median
                 source = peers_source
             elif (
-                hist_p50 is not None
-                and hist_p50 > 0
+                hist_anchor is not None
+                and hist_anchor > 0
                 and not pe_history_unusable
             ):
-                target = hist_p50
-                source = "自身历史50分位"
+                target = hist_anchor
+                source = hist_source_label
             elif model_usable:
                 model_multiple = _model_multiple(model_targets, key)
                 if model_multiple is not None:
@@ -1061,32 +1085,32 @@ def relative_valuation(
                 "历史PE分位区间含亏损期（p25≤0），PE自身历史锚不参与估值。"
             )
         if (
-            source != "自身历史50分位"
-            and hist_p50 is not None
-            and hist_p50 > 0
+            source != hist_source_label
+            and hist_anchor is not None
+            and hist_anchor > 0
             and not pe_history_unusable
         ):
             cap_multiple = history_cap * target
             hist_multiple_low = (
                 hist_p25
                 if hist_p25 is not None and hist_p25 > 0
-                else hist_p50 * (1.0 - target_band)
+                else hist_anchor * (1.0 - target_band)
             )
             hist_multiple_high = (
                 hist_p75
                 if hist_p75 is not None and hist_p75 > 0
-                else hist_p50 * (1.0 + target_band)
+                else hist_anchor * (1.0 + target_band)
             )
-            hist_multiple = min(hist_p50, cap_multiple)
+            hist_multiple = min(hist_anchor, cap_multiple)
             hist_multiple_low = min(
-                min(hist_multiple_low, hist_p50), cap_multiple
+                min(hist_multiple_low, hist_anchor), cap_multiple
             )
             hist_multiple_high = min(
-                max(hist_multiple_high, hist_p50), cap_multiple
+                max(hist_multiple_high, hist_anchor), cap_multiple
             )
-            if hist_p50 > cap_multiple:
+            if hist_anchor > cap_multiple:
                 notes.append(
-                    f"{names[key]}自身历史50分位 {hist_p50:.2f} 显著高于当前基准"
+                    f"{names[key]}{hist_source_label} {hist_anchor:.2f} 显著高于当前基准"
                     f"（上限 {history_cap:.1f} 倍），已按上限参与。"
                 )
             hist_price = base * hist_multiple
@@ -1101,7 +1125,7 @@ def relative_valuation(
                         "name": f"{names[key]}(历史分位)",
                         "base": _round(base),
                         "target_multiple": _round(hist_multiple),
-                        "target_source": "自身历史50分位",
+                        "target_source": hist_source_label,
                         "implied_price": _round(hist_price),
                         "implied_low": _round(base * hist_multiple_low),
                         "implied_high": _round(base * hist_multiple_high),

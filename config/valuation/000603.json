@@ -1,0 +1,7 @@
+{
+  "skip_llm_peer_validation": true,
+  "manual_peers": [
+    { "code": "000426", "name": "兴业银锡" },
+    { "code": "601212", "name": "白银有色" }
+  ]
+}
