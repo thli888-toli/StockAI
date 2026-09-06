@@ -468,6 +468,61 @@ def test_watchlist_migrates_adds_tags_column(tmp_path):
     assert store.get("default", "600519")["tags"] == ["白酒"]
 
 
+def test_store_migrates_legacy_chart_snapshots_without_market(tmp_path):
+    """Old DBs whose chart_snapshots table lacks market must still boot."""
+    db_path = tmp_path / "legacy_snapshot.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE watchlist (
+            user_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            company_name TEXT NOT NULL DEFAULT '',
+            industry TEXT NOT NULL DEFAULT '',
+            tags TEXT NOT NULL DEFAULT '[]',
+            run_id TEXT,
+            status TEXT NOT NULL DEFAULT 'running',
+            error TEXT,
+            outputs TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(user_id, symbol)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE chart_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            period TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            payload TEXT NOT NULL,
+            saved_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = WatchlistStore(db_path)
+    with store.lock:
+        columns = {
+            row["name"]
+            for row in store.conn.execute("PRAGMA table_info(chart_snapshots)")
+        }
+    assert "market" in columns
+    store.save_chart_snapshot(
+        "default",
+        "600519",
+        "daily",
+        {"candles": []},
+        market="a",
+    )
+    assert len(store.list_chart_snapshots("default", "600519", "a")) == 1
+
+
 def test_watchlist_tags_api_roundtrip(monkeypatch, tmp_path):
     def fake_post(url, json=None, timeout=None):
         return FakeResponse(200, _run_payload("r1", "running", json["query"]))

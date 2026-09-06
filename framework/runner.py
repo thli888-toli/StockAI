@@ -95,82 +95,100 @@ def start_all(
         "plugins/us_fundamental/agent.yaml",
         "plugins/us_validator/agent.yaml",
     ]
-    processes: list[subprocess.Popen] = []
+    processes: list[tuple[str, subprocess.Popen]] = []
     try:
         processes.append(
-            subprocess.Popen(
-                [_python(), "-m", "main", "registry"],
-                cwd=root,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
+            (
+                "registry",
+                subprocess.Popen(
+                    [_python(), "-m", "main", "registry"],
+                    cwd=root,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
+                ),
             )
         )
         time.sleep(0.3)
         for plugin in plugin_paths:
             processes.append(
-                subprocess.Popen(
-                    [_python(), "-m", "main", "agent", "--manifest", plugin],
-                    cwd=root,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.STDOUT,
+                (
+                    f"agent:{plugin}",
+                    subprocess.Popen(
+                        [_python(), "-m", "main", "agent", "--manifest", plugin],
+                        cwd=root,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.STDOUT,
+                    ),
                 )
             )
         processes.append(
-            subprocess.Popen(
-                [
-                    _python(),
-                    "-m",
-                    "main",
-                    "orchestrator",
-                    "--manifest",
-                    manifest_path,
-                    "--port",
-                    str(orchestrator_port),
-                    "--checkpoint-db",
-                    str(CHECKPOINT_DB),
-                    "--queue-db",
-                    str(RUN_QUEUE_DB),
-                ],
-                cwd=root,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
+            (
+                f"orchestrator:{manifest_path}",
+                subprocess.Popen(
+                    [
+                        _python(),
+                        "-m",
+                        "main",
+                        "orchestrator",
+                        "--manifest",
+                        manifest_path,
+                        "--port",
+                        str(orchestrator_port),
+                        "--checkpoint-db",
+                        str(CHECKPOINT_DB),
+                        "--queue-db",
+                        str(RUN_QUEUE_DB),
+                    ],
+                    cwd=root,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
+                ),
             )
         )
         processes.append(
-            subprocess.Popen(
-                [
-                    _python(),
-                    "-m",
-                    "main",
-                    "orchestrator",
-                    "--manifest",
-                    us_manifest_path,
-                    "--port",
-                    str(us_orchestrator_port),
-                    "--checkpoint-db",
-                    "state/orchestrator_us.db",
-                    "--queue-db",
-                    "state/orchestrator_queue_us.db",
-                ],
-                cwd=root,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
+            (
+                f"orchestrator_us:{us_manifest_path}",
+                subprocess.Popen(
+                    [
+                        _python(),
+                        "-m",
+                        "main",
+                        "orchestrator",
+                        "--manifest",
+                        us_manifest_path,
+                        "--port",
+                        str(us_orchestrator_port),
+                        "--checkpoint-db",
+                        "state/orchestrator_us.db",
+                        "--queue-db",
+                        "state/orchestrator_queue_us.db",
+                    ],
+                    cwd=root,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
+                ),
             )
         )
         processes.append(
-            subprocess.Popen(
-                [_python(), "-m", "main", "portal"],
-                cwd=root,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
+            (
+                "portal",
+                subprocess.Popen(
+                    [_python(), "-m", "main", "portal"],
+                    cwd=root,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
+                ),
             )
         )
         processes.append(
-            subprocess.Popen(
-                [_python(), "-m", "main", "stockportal"],
-                cwd=root,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
+            (
+                "stockportal",
+                subprocess.Popen(
+                    [_python(), "-m", "main", "stockportal"],
+                    cwd=root,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT,
+                ),
             )
         )
         print(
@@ -178,17 +196,20 @@ def start_all(
             "monitoring portal, and stock portal. Press Ctrl+C to stop."
         )
         while True:
-            for proc in processes:
+            for label, proc in processes:
                 if proc.poll() is not None:
-                    raise RuntimeError("a service exited unexpectedly")
+                    raise RuntimeError(
+                        f"service '{label}' exited unexpectedly "
+                        f"with code {proc.returncode}"
+                    )
             time.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:
-        for proc in processes:
+        for _, proc in processes:
             if proc.poll() is None:
                 proc.terminate()
-        for proc in processes:
+        for _, proc in processes:
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:

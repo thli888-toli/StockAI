@@ -65,8 +65,8 @@ class WatchlistStore:
                     payload TEXT NOT NULL,
                     saved_at TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_chart_snapshots_user_market_symbol
-                    ON chart_snapshots(user_id, market, symbol, saved_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_chart_snapshots_user_symbol
+                    ON chart_snapshots(user_id, symbol, saved_at DESC);
                 """
             )
             columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(watchlist)")}
@@ -153,6 +153,12 @@ class WatchlistStore:
                 self.conn.execute(
                     "ALTER TABLE chart_snapshots ADD COLUMN market TEXT NOT NULL DEFAULT 'a'"
                 )
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_chart_snapshots_user_market_symbol
+                ON chart_snapshots(user_id, market, symbol, saved_at DESC)
+                """
+            )
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO users(id, openid, nickname, avatar, created_at)
