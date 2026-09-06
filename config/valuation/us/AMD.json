@@ -1,0 +1,14 @@
+{
+  "config_version": "1.0",
+  "manual_peers": [
+    {"code": "NVDA", "name": "NVIDIA"},
+    {"code": "AVGO", "name": "Broadcom"},
+    {"code": "QCOM", "name": "Qualcomm"},
+    {"code": "MU", "name": "Micron"},
+    {"code": "MRVL", "name": "Marvell"}
+  ],
+  "max_growth": 0.50,
+  "discount_rate": 0.09,
+  "sensitivity_rates": [0.07, 0.11],
+  "terminal_growth": 0.03
+}
