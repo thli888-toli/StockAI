@@ -47,41 +47,51 @@ export const api = {
       body: JSON.stringify({ nickname })
     }),
   me: () => request<UserInfo>("/api/me"),
-  listWatchlist: () => request<WatchlistItem[]>("/api/watchlist"),
-  addWatchlist: (query: string) =>
+  listWatchlist: (market: string = "a") =>
+    request<WatchlistItem[]>(`/api/watchlist?market=${encodeURIComponent(market)}`),
+  addWatchlist: (query: string, market: string = "a") =>
     request<AddResult>("/api/watchlist", {
       method: "POST",
-      body: JSON.stringify({ query })
+      body: JSON.stringify({ query, market })
     }),
-  refreshWatchlist: (symbol: string) =>
-    request<RefreshResult>(`/api/watchlist/${encodeURIComponent(symbol)}/refresh`, {
-      method: "POST"
-    }),
-  removeWatchlist: (symbol: string) =>
-    request<{ deleted: boolean }>(`/api/watchlist/${encodeURIComponent(symbol)}`, {
-      method: "DELETE"
-    }),
-  updateTags: (symbol: string, tags: string[]) =>
-    request<WatchlistItem>(`/api/watchlist/${encodeURIComponent(symbol)}/tags`, {
-      method: "PUT",
-      body: JSON.stringify({ tags })
-    }),
-  saveChart: (symbol: string, period: string) =>
-    request<{ id: number; period: string; label: string; saved_at: string }>(
-      `/api/watchlist/${encodeURIComponent(symbol)}/chart/save`,
-      { method: "POST", body: JSON.stringify({ period }) }
+  refreshWatchlist: (symbol: string, market: string = "a") =>
+    request<RefreshResult>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/refresh?market=${encodeURIComponent(market)}`,
+      {
+        method: "POST"
+      }
     ),
-  listChartSnapshots: (symbol: string) =>
-    request<{ id: number; period: string; label: string; saved_at: string }[]>(
-      `/api/watchlist/${encodeURIComponent(symbol)}/charts`
-    ),
-  getChartSnapshot: (symbol: string, id: number) =>
-    request<Record<string, unknown> & { payload: unknown }>(
-      `/api/watchlist/${encodeURIComponent(symbol)}/charts/${id}`
-    ),
-  deleteChartSnapshot: (symbol: string, id: number) =>
+  removeWatchlist: (symbol: string, market: string = "a") =>
     request<{ deleted: boolean }>(
-      `/api/watchlist/${encodeURIComponent(symbol)}/charts/${id}`,
+      `/api/watchlist/${encodeURIComponent(symbol)}?market=${encodeURIComponent(market)}`,
+      {
+        method: "DELETE"
+      }
+    ),
+  updateTags: (symbol: string, tags: string[], market: string = "a") =>
+    request<WatchlistItem>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/tags?market=${encodeURIComponent(market)}`,
+      {
+      method: "PUT",
+        body: JSON.stringify({ tags, market })
+      }
+    ),
+  saveChart: (symbol: string, period: string, market: string = "a") =>
+    request<{ id: number; period: string; label: string; saved_at: string }>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/chart/save?market=${encodeURIComponent(market)}`,
+      { method: "POST", body: JSON.stringify({ period, market }) }
+    ),
+  listChartSnapshots: (symbol: string, market: string = "a") =>
+    request<{ id: number; period: string; label: string; saved_at: string }[]>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/charts?market=${encodeURIComponent(market)}`
+    ),
+  getChartSnapshot: (symbol: string, id: number, market: string = "a") =>
+    request<Record<string, unknown> & { payload: unknown }>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/charts/${id}?market=${encodeURIComponent(market)}`
+    ),
+  deleteChartSnapshot: (symbol: string, id: number, market: string = "a") =>
+    request<{ deleted: boolean }>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/charts/${id}?market=${encodeURIComponent(market)}`,
       { method: "DELETE" }
     )
 };

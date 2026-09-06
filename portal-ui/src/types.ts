@@ -16,6 +16,7 @@ export type RunEvent = {
 
 export type RunSummary = {
   run_id: string;
+  market?: string;
   graph_config?: string | null;
   status: "queued" | "running" | "completed" | "failed";
   query: string;

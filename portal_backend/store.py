@@ -69,11 +69,12 @@ class PortalStore:
                     events TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS graph (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    market TEXT PRIMARY KEY,
                     data TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS graph_configs (
+                    market TEXT NOT NULL,
                     name TEXT PRIMARY KEY,
                     active INTEGER NOT NULL,
                     updated_at TEXT NOT NULL
@@ -81,6 +82,39 @@ class PortalStore:
                 """
             )
         self._ensure_column("runs", "graph_config", "TEXT")
+        self._ensure_column("runs", "market", "TEXT")
+        with self.lock, self.conn:
+            graph_columns = {
+                row["name"] for row in self.conn.execute("PRAGMA table_info(graph)")
+            }
+            if "market" not in graph_columns:
+                self.conn.execute("DROP TABLE graph")
+                self.conn.execute(
+                    """
+                    CREATE TABLE graph (
+                        market TEXT PRIMARY KEY,
+                        data TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+            config_columns = {
+                row["name"]
+                for row in self.conn.execute("PRAGMA table_info(graph_configs)")
+            }
+            if "market" not in config_columns:
+                self.conn.execute("DROP TABLE graph_configs")
+                self.conn.execute(
+                    """
+                    CREATE TABLE graph_configs (
+                        market TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        active INTEGER NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(market, name)
+                    )
+                    """
+                )
 
     def _ensure_column(self, table: str, column: str, column_type: str) -> None:
         with self.lock, self.conn:
@@ -150,9 +184,13 @@ class PortalStore:
         with self.lock, self.conn:
             self.conn.execute(
                 """
-                INSERT INTO runs(run_id, graph_config, status, query, outputs, error, created_at, updated_at, events)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO runs(
+                    run_id, market, graph_config, status, query, outputs,
+                    error, created_at, updated_at, events
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
+                    market=excluded.market,
                     graph_config=excluded.graph_config,
                     status=excluded.status,
                     outputs=excluded.outputs,
@@ -162,6 +200,7 @@ class PortalStore:
                 """,
                 (
                     run["run_id"],
+                    run.get("market", "a"),
                     run.get("graph_config"),
                     run["status"],
                     run["query"],
@@ -173,11 +212,16 @@ class PortalStore:
                 ),
             )
 
-    def mark_orphaned_running_runs_failed(self, known_run_ids: set[str]) -> None:
+    def mark_orphaned_running_runs_failed(
+        self,
+        known_run_ids: set[str],
+        market: str = "a",
+    ) -> None:
         """Mark a stored 'running' run failed only when it disappeared from the orchestrator."""
         with self.lock:
             rows = self.conn.execute(
-                "SELECT run_id FROM runs WHERE status='running'"
+                "SELECT run_id FROM runs WHERE status='running' AND market=?",
+                (market,),
             ).fetchall()
             for row in rows:
                 if row["run_id"] not in known_run_ids:
@@ -186,23 +230,35 @@ class PortalStore:
                         (row["run_id"],),
                     )
 
-    def set_graph(self, data: dict[str, Any]) -> None:
+    def set_graph(self, market: str, data: dict[str, Any]) -> None:
         with self.lock, self.conn:
             self.conn.execute(
                 """
-                INSERT INTO graph(id, data, updated_at) VALUES(1, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at
+                INSERT INTO graph(market, data, updated_at) VALUES(?, ?, ?)
+                ON CONFLICT(market) DO UPDATE SET
+                    data=excluded.data, updated_at=excluded.updated_at
                 """,
-                (json.dumps(data, default=str), _now()),
+                (market, json.dumps(data, default=str), _now()),
             )
 
-    def set_graph_configs(self, configs: list[dict[str, Any]]) -> None:
+    def set_graph_configs(
+        self,
+        market: str,
+        configs: list[dict[str, Any]],
+    ) -> None:
         with self.lock, self.conn:
-            self.conn.execute("DELETE FROM graph_configs")
+            self.conn.execute(
+                "DELETE FROM graph_configs WHERE market=?",
+                (market,),
+            )
             self.conn.executemany(
-                "INSERT INTO graph_configs(name, active, updated_at) VALUES(?, ?, ?)",
+                """
+                INSERT INTO graph_configs(market, name, active, updated_at)
+                VALUES(?, ?, ?, ?)
+                """,
                 [
                     (
+                        market,
                         item["name"],
                         1 if item.get("active") else 0,
                         _now(),
@@ -216,15 +272,19 @@ class PortalStore:
             rows = self.conn.execute("SELECT * FROM agents ORDER BY name").fetchall()
         return [dict(row) for row in rows]
 
-    def get_graph(self) -> dict[str, Any] | None:
+    def get_graph(self, market: str = "a") -> dict[str, Any] | None:
         with self.lock:
-            row = self.conn.execute("SELECT data FROM graph WHERE id=1").fetchone()
+            row = self.conn.execute(
+                "SELECT data FROM graph WHERE market=?",
+                (market,),
+            ).fetchone()
         return json.loads(row["data"]) if row else None
 
-    def get_graph_configs(self) -> list[dict[str, Any]]:
+    def get_graph_configs(self, market: str = "a") -> list[dict[str, Any]]:
         with self.lock:
             rows = self.conn.execute(
-                "SELECT name, active FROM graph_configs ORDER BY name"
+                "SELECT name, active FROM graph_configs WHERE market=? ORDER BY name",
+                (market,),
             ).fetchall()
         return [{"name": row["name"], "active": bool(row["active"])} for row in rows]
 

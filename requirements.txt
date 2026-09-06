@@ -17,3 +17,5 @@ numpy
 lightgbm
 scikit-learn
 torch
+yfinance>=0.2.40
+tzdata

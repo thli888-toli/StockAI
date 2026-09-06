@@ -378,6 +378,25 @@ class Orchestrator:
                 "edges": [edge.model_dump(by_alias=True) for edge in manifest.edges],
             }
 
+        @app.get("/graph/{manifest_name}")
+        async def get_graph_by_name(manifest_name: str):
+            candidate = (self.manifest_dir / manifest_name).resolve()
+            if not candidate.is_relative_to(self.manifest_dir):
+                raise HTTPException(status_code=422, detail="manifest must be inside the manifest directory")
+            try:
+                manifest = load_graph_manifest(candidate)
+            except FileNotFoundError as exc:
+                raise HTTPException(status_code=404, detail="graph manifest not found") from exc
+            return {
+                "name": manifest.name,
+                "entry": manifest.entry,
+                "nodes": {
+                    node_id: spec.model_dump()
+                    for node_id, spec in manifest.nodes.items()
+                },
+                "edges": [edge.model_dump(by_alias=True) for edge in manifest.edges],
+            }
+
         @app.get("/graph-configs")
         async def get_graph_configs():
             return self.list_graph_configs()

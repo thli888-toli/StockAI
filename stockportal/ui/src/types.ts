@@ -12,6 +12,7 @@ export type RunSummary = {
 export type RunStatus = "queued" | "running" | "completed" | "failed";
 
 export type WatchlistItem = {
+  market?: string;
   symbol: string;
   company_name: string;
   industry: string;

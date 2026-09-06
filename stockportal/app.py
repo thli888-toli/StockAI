@@ -7,14 +7,16 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from fastapi import Query
 
-from framework.config import ORCHESTRATOR_URL, STOCK_PORTAL_DB
+from framework.config import ORCHESTRATOR_URL, STOCK_PORTAL_DB, US_ORCHESTRATOR_URL
 from plugins.stock_common import compute_macd
 from stockportal.auth import AuthStore
 from stockportal.store import WatchlistStore
@@ -28,10 +30,12 @@ class RunCreatePayload(BaseModel):
 
 class WatchlistAddPayload(BaseModel):
     query: str
+    market: str = "a"
 
 
 class WatchlistTagPayload(BaseModel):
     tags: list[str] = []
+    market: str = "a"
 
 
 class LoginPayload(BaseModel):
@@ -42,16 +46,48 @@ class LoginPayload(BaseModel):
 class ChartSavePayload(BaseModel):
     period: str
     label: str | None = None
+    market: str = "a"
 
 
-def _validate_symbol(symbol: str) -> str:
+def _validate_market(market: str) -> str:
+    market = (market or "a").strip().lower()
+    if market not in ("a", "us"):
+        raise HTTPException(status_code=422, detail="market must be 'a' or 'us'")
+    return market
+
+
+def _validate_symbol(symbol: str, market: str = "a") -> str:
+    market = _validate_market(market)
     symbol = symbol.strip()
-    if not re.fullmatch(r"\d{6}", symbol):
-        raise HTTPException(status_code=422, detail="symbol must be a 6-digit A-share code")
+    if market == "a":
+        if not re.fullmatch(r"\d{6}", symbol):
+            raise HTTPException(
+                status_code=422,
+                detail="symbol must be a 6-digit A-share code",
+            )
+    else:
+        symbol = symbol.upper()
+        if not re.fullmatch(
+            r"[A-Z][A-Z0-9]{0,9}([.\-][A-Z0-9]{1,2})?",
+            symbol,
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="symbol must be a valid US ticker, e.g. AAPL or BRK.B",
+            )
     return symbol
 
 
-def _is_today(iso_value: str | None) -> bool:
+def _market_now(market: str) -> datetime:
+    if market == "us":
+        try:
+            return datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            return datetime.now(timezone.utc) - timedelta(hours=5)
+    return datetime.now(timezone(timedelta(hours=8)))
+
+
+def _is_today(iso_value: str | None, market: str = "a") -> bool:
     if not iso_value:
         return False
     try:
@@ -60,8 +96,8 @@ def _is_today(iso_value: str | None) -> bool:
         return False
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    shanghai = timezone(timedelta(hours=8))
-    return value.astimezone(shanghai).date() == datetime.now(shanghai).date()
+    local = _market_now(market)
+    return value.astimezone(local.tzinfo).date() == local.date()
 
 
 def _market_data_from_outputs(outputs: dict[str, Any]) -> dict[str, Any]:
@@ -392,7 +428,12 @@ def _metadata_from_outputs(outputs: dict[str, Any]) -> tuple[str, str]:
     return str(data.get("company_name") or ""), str(data.get("industry") or "")
 
 
-def _sync_watchlist(store: WatchlistStore, user_id: str, orchestrator_url: str) -> None:
+def _sync_market_watchlist(
+    store: WatchlistStore,
+    user_id: str,
+    orchestrator_url: str,
+    market: str,
+) -> None:
     base = orchestrator_url.rstrip("/")
     try:
         response = httpx.get(f"{base}/runs", timeout=5.0)
@@ -407,7 +448,7 @@ def _sync_watchlist(store: WatchlistStore, user_id: str, orchestrator_url: str) 
         for run in runs
         if isinstance(run, dict) and run.get("run_id")
     }
-    for item in store.all_items(user_id):
+    for item in store.all_items(user_id, market):
         run_id = item.get("run_id")
         run = runs_by_id.get(run_id) if run_id else None
         if run:
@@ -418,6 +459,7 @@ def _sync_watchlist(store: WatchlistStore, user_id: str, orchestrator_url: str) 
             store.upsert(
                 user_id,
                 item["symbol"],
+                market=market,
                 run_id=run_id,
                 status=run.get("status", "failed"),
                 error=run.get("error"),
@@ -429,6 +471,7 @@ def _sync_watchlist(store: WatchlistStore, user_id: str, orchestrator_url: str) 
             store.upsert(
                 user_id,
                 item["symbol"],
+                market=market,
                 run_id=run_id,
                 status="failed",
                 error="run no longer available (orchestrator may have restarted)",
@@ -440,6 +483,7 @@ def _sync_watchlist(store: WatchlistStore, user_id: str, orchestrator_url: str) 
 
 def create_stock_portal_app(
     orchestrator_url: str = ORCHESTRATOR_URL,
+    us_orchestrator_url: str = US_ORCHESTRATOR_URL,
     db_path: str | Path = STOCK_PORTAL_DB,
 ) -> FastAPI:
     store = WatchlistStore(db_path)
@@ -470,6 +514,9 @@ def create_stock_portal_app(
         )
         return payload
 
+    def _url_for_market(market: str) -> str:
+        return us_orchestrator_url if market == "us" else orchestrator_url
+
     app = FastAPI(title="StockAI Portal", version="1.0.0")
 
     @app.get("/health")
@@ -485,10 +532,14 @@ def create_stock_portal_app(
         return user
 
     @app.post("/api/runs")
-    def create_run(payload: RunCreatePayload):
+    def create_run(
+        payload: RunCreatePayload,
+        market: str = Query(default="a"),
+    ):
+        market = _validate_market(market)
         try:
             response = httpx.post(
-                f"{orchestrator_url.rstrip('/')}/runs",
+                f"{_url_for_market(market).rstrip('/')}/runs",
                 json=payload.model_dump(),
                 timeout=10.0,
             )
@@ -506,10 +557,14 @@ def create_stock_portal_app(
             ) from exc
 
     @app.get("/api/runs/{run_id}")
-    def get_run(run_id: str):
+    def get_run(
+        run_id: str,
+        market: str = Query(default="a"),
+    ):
+        market = _validate_market(market)
         try:
             response = httpx.get(
-                f"{orchestrator_url.rstrip('/')}/runs/{run_id}",
+                f"{_url_for_market(market).rstrip('/')}/runs/{run_id}",
                 timeout=10.0,
             )
             if response.status_code >= 400:
@@ -526,22 +581,36 @@ def create_stock_portal_app(
             ) from exc
 
     @app.get("/api/watchlist")
-    def list_watchlist(user: dict[str, Any] = Depends(get_current_user)):
-        _sync_watchlist(store, user["user_id"], orchestrator_url)
-        return store.all_items(user["user_id"])
+    def list_watchlist(
+        market: str = Query(default="a"),
+        user: dict[str, Any] = Depends(get_current_user),
+    ):
+        market = _validate_market(market)
+        _sync_market_watchlist(
+            store,
+            user["user_id"],
+            _url_for_market(market),
+            market,
+        )
+        return store.all_items(user["user_id"], market)
 
     @app.post("/api/watchlist")
     def add_to_watchlist(
         payload: WatchlistAddPayload,
         user: dict[str, Any] = Depends(get_current_user),
     ):
-        symbol = _validate_symbol(payload.query)
-        if store.get(user["user_id"], symbol) is not None:
-            return {"already_exists": True, "message": "股票已经在股票池中"}
-        run = _create_run(orchestrator_url, symbol)
+        market = _validate_market(payload.market)
+        symbol = _validate_symbol(payload.query, market)
+        if store.get(user["user_id"], symbol, market) is not None:
+            return {
+                "already_exists": True,
+                "message": "股票已经在股票池中",
+            }
+        run = _create_run(_url_for_market(market), symbol)
         return store.upsert(
             user["user_id"],
             symbol,
+            market=market,
             run_id=run["run_id"],
             status=run["status"],
             error=run["error"],
@@ -552,20 +621,26 @@ def create_stock_portal_app(
     def refresh_watchlist(
         symbol: str,
         user: dict[str, Any] = Depends(get_current_user),
+        market: str = Query(default="a"),
     ):
-        symbol = _validate_symbol(symbol)
-        existing = store.get(user["user_id"], symbol)
+        market = _validate_market(market)
+        symbol = _validate_symbol(symbol, market)
+        existing = store.get(user["user_id"], symbol, market)
         if existing is None:
             raise HTTPException(status_code=404, detail="watchlist symbol not found")
-        if existing.get("status") == "completed" and _is_today(existing.get("updated_at")):
+        if existing.get("status") == "completed" and _is_today(
+            existing.get("updated_at"),
+            market,
+        ):
             return {
                 "already_generated": True,
                 "message": "今日股票分析已经生成，无需重复刷新",
             }
-        run = _create_run(orchestrator_url, symbol)
+        run = _create_run(_url_for_market(market), symbol)
         return store.upsert(
             user["user_id"],
             symbol,
+            market=market,
             run_id=run["run_id"],
             status=run["status"],
             error=run["error"],
@@ -578,9 +653,11 @@ def create_stock_portal_app(
     def delete_watchlist(
         symbol: str,
         user: dict[str, Any] = Depends(get_current_user),
+        market: str = Query(default="a"),
     ):
-        symbol = _validate_symbol(symbol)
-        if not store.delete(user["user_id"], symbol):
+        market = _validate_market(market)
+        symbol = _validate_symbol(symbol, market)
+        if not store.delete(user["user_id"], symbol, market):
             raise HTTPException(status_code=404, detail="watchlist symbol not found")
         return {"deleted": True}
 
@@ -590,10 +667,11 @@ def create_stock_portal_app(
         payload: WatchlistTagPayload,
         user: dict[str, Any] = Depends(get_current_user),
     ):
-        symbol = _validate_symbol(symbol)
-        if store.get(user["user_id"], symbol) is None:
+        market = _validate_market(payload.market)
+        symbol = _validate_symbol(symbol, market)
+        if store.get(user["user_id"], symbol, market) is None:
             raise HTTPException(status_code=404, detail="watchlist symbol not found")
-        item = store.update_tags(user["user_id"], symbol, payload.tags)
+        item = store.update_tags(user["user_id"], symbol, payload.tags, market)
         if item is None:
             raise HTTPException(status_code=404, detail="watchlist symbol not found")
         return item
@@ -603,11 +681,13 @@ def create_stock_portal_app(
         symbol: str,
         period: str = "daily",
         user: dict[str, Any] = Depends(get_current_user),
+        market: str = Query(default="a"),
     ):
-        symbol = _validate_symbol(symbol)
+        market = _validate_market(market)
+        symbol = _validate_symbol(symbol, market)
         if period not in ("daily", "weekly", "monthly"):
             raise HTTPException(status_code=422, detail="period must be daily, weekly, or monthly")
-        item = store.get(user["user_id"], symbol)
+        item = store.get(user["user_id"], symbol, market)
         if item is None:
             raise HTTPException(status_code=404, detail="watchlist symbol not found")
         payload = _chart_payload_for_item(symbol, item, period)
@@ -621,12 +701,13 @@ def create_stock_portal_app(
         payload: ChartSavePayload,
         user: dict[str, Any] = Depends(get_current_user),
     ):
-        symbol = _validate_symbol(symbol)
+        market = _validate_market(payload.market)
+        symbol = _validate_symbol(symbol, market)
         if payload.period not in ("daily", "weekly", "monthly"):
             raise HTTPException(
                 status_code=422, detail="period must be daily, weekly, or monthly"
             )
-        item = store.get(user["user_id"], symbol)
+        item = store.get(user["user_id"], symbol, market)
         if item is None:
             raise HTTPException(status_code=404, detail="watchlist symbol not found")
         chart_payload = _chart_payload_for_item(symbol, item, payload.period)
@@ -638,24 +719,29 @@ def create_stock_portal_app(
             payload.period,
             chart_payload,
             payload.label or "",
+            market,
         )
 
     @app.get("/api/watchlist/{symbol}/charts")
     def list_charts(
         symbol: str,
         user: dict[str, Any] = Depends(get_current_user),
+        market: str = Query(default="a"),
     ):
-        symbol = _validate_symbol(symbol)
-        return store.list_chart_snapshots(user["user_id"], symbol)
+        market = _validate_market(market)
+        symbol = _validate_symbol(symbol, market)
+        return store.list_chart_snapshots(user["user_id"], symbol, market)
 
     @app.get("/api/watchlist/{symbol}/charts/{snapshot_id}")
     def get_chart_snapshot(
         symbol: str,
         snapshot_id: int,
         user: dict[str, Any] = Depends(get_current_user),
+        market: str = Query(default="a"),
     ):
-        symbol = _validate_symbol(symbol)
-        snapshot = store.get_chart_snapshot(user["user_id"], symbol, snapshot_id)
+        market = _validate_market(market)
+        symbol = _validate_symbol(symbol, market)
+        snapshot = store.get_chart_snapshot(user["user_id"], symbol, snapshot_id, market)
         if snapshot is None:
             raise HTTPException(status_code=404, detail="chart snapshot not found")
         return snapshot
@@ -665,9 +751,16 @@ def create_stock_portal_app(
         symbol: str,
         snapshot_id: int,
         user: dict[str, Any] = Depends(get_current_user),
+        market: str = Query(default="a"),
     ):
-        symbol = _validate_symbol(symbol)
-        if not store.delete_chart_snapshot(user["user_id"], symbol, snapshot_id):
+        market = _validate_market(market)
+        symbol = _validate_symbol(symbol, market)
+        if not store.delete_chart_snapshot(
+            user["user_id"],
+            symbol,
+            snapshot_id,
+            market,
+        ):
             raise HTTPException(status_code=404, detail="chart snapshot not found")
         return {"deleted": True}
 

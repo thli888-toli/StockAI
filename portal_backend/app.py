@@ -6,13 +6,19 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from framework.config import ORCHESTRATOR_URL, PORTAL_DB, REGISTRY_URL
+from framework.config import (
+    ORCHESTRATOR_URL,
+    PORTAL_DB,
+    REGISTRY_URL,
+    US_ORCHESTRATOR_URL,
+)
 from portal_backend.aggregator import PortalAggregator
 from portal_backend.store import PortalStore
 
@@ -28,15 +34,24 @@ class MetricIngestPayload(BaseModel):
 
 class GraphConfigApplyPayload(BaseModel):
     name: str
+    market: str = "a"
 
 
 def create_portal_app(
     db_path: str = PORTAL_DB,
     registry_url: str = REGISTRY_URL,
     orchestrator_url: str = ORCHESTRATOR_URL,
+    us_orchestrator_url: str = US_ORCHESTRATOR_URL,
 ) -> FastAPI:
     store = PortalStore(db_path)
     aggregator = PortalAggregator(store, registry_url, orchestrator_url)
+
+    def _urls_for(market: str | None) -> list[str]:
+        if market == "us":
+            return [us_orchestrator_url.rstrip("/")]
+        if market == "a":
+            return [orchestrator_url.rstrip("/")]
+        return [orchestrator_url.rstrip("/"), us_orchestrator_url.rstrip("/")]
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -59,28 +74,41 @@ def create_portal_app(
         return store.get_agents()
 
     @app.get("/api/graph")
-    def graph():
+    def graph(
+        market: str = Query(default="a"),
+        manifest: str | None = Query(default=None),
+    ):
         try:
-            response = httpx.get(f"{orchestrator_url.rstrip('/')}/graph", timeout=3.0)
+            url = us_orchestrator_url if market == "us" else orchestrator_url
+            graph_url = f"{url.rstrip('/')}/graph"
+            if manifest:
+                graph_url += f"/{quote(manifest)}"
+            response = httpx.get(graph_url, timeout=3.0)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPError:
-            return store.get_graph()
+            return store.get_graph(market) or {
+                "name": f"market_{market}",
+                "nodes": {},
+                "edges": [],
+            }
 
     @app.get("/api/graph-configs")
-    def graph_configs():
+    def graph_configs(market: str = Query(default="a")):
         try:
-            response = httpx.get(f"{orchestrator_url.rstrip('/')}/graph-configs", timeout=3.0)
+            url = us_orchestrator_url if market == "us" else orchestrator_url
+            response = httpx.get(f"{url.rstrip('/')}/graph-configs", timeout=3.0)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPError:
-            return store.get_graph_configs()
+            return store.get_graph_configs(market)
 
     @app.post("/api/graph-configs/apply")
     def apply_graph_config(payload: GraphConfigApplyPayload):
         try:
+            url = us_orchestrator_url if payload.market == "us" else orchestrator_url
             response = httpx.post(
-                f"{orchestrator_url.rstrip('/')}/graph-configs/apply",
+                f"{url.rstrip('/')}/graph-configs/apply",
                 json={"name": payload.name},
                 timeout=5.0,
             )
@@ -102,28 +130,47 @@ def create_portal_app(
         return store.list_runs(limit, graph_config)
 
     @app.get("/api/runs/{run_id}")
-    def run(run_id: str):
+    def run(
+        run_id: str,
+        market: str | None = Query(default=None),
+    ):
         item = store.get_run(run_id)
         if item is None:
             raise HTTPException(status_code=404, detail="run not found")
+        market = market or item.get("market") or "a"
+        for base in _urls_for(market):
+            try:
+                response = httpx.get(f"{base}/runs/{run_id}", timeout=5.0)
+                if response.status_code == 200:
+                    return response.json()
+            except httpx.HTTPError:
+                continue
         return item
 
     @app.post("/api/runs/{run_id}/cancel")
-    def cancel_run(run_id: str):
-        try:
-            response = httpx.post(
-                f"{orchestrator_url.rstrip('/')}/runs/{run_id}/cancel",
-                timeout=5.0,
-            )
-            if response.status_code >= 400:
+    def cancel_run(
+        run_id: str,
+        market: str | None = Query(default=None),
+    ):
+        item = store.get_run(run_id)
+        market = market or (item.get("market") if item else None) or "a"
+        last_error = "orchestrator cancel failed"
+        for base in _urls_for(market):
+            try:
+                response = httpx.post(
+                    f"{base}/runs/{run_id}/cancel",
+                    timeout=5.0,
+                )
+                if response.status_code < 400:
+                    return response.json()
                 try:
                     detail = response.json()
                 except Exception:
                     detail = response.text
-                raise HTTPException(status_code=response.status_code, detail=detail)
-            return response.json()
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"orchestrator cancel failed: {exc}") from exc
+                last_error = f"orchestrator cancel failed: {detail}"
+            except httpx.HTTPError as exc:
+                last_error = f"orchestrator cancel failed: {exc}"
+        raise HTTPException(status_code=502, detail=last_error)
 
     @app.get("/api/agents/{agent_name}/metrics")
     def agent_metrics(agent_name: str, limit: int = Query(default=200, ge=1, le=1000)):

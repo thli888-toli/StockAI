@@ -29,9 +29,11 @@ DEEPSEEK_API_KEY=your_key
 DEEPSEEK_MODEL=deepseek-v4-pro
 RUN_TIMEOUT_SECONDS=180
 STOCK_CACHE_DB=state/stock_cache.db
+US_STOCK_CACHE_DB=state/us_stock_cache.db
+SEC_EDGAR_USER_AGENT=StockAI Research contact@example.com
 ```
 
-If no LLM key is set, `stock_analyst` uses a deterministic fallback.
+If no LLM key is set, `stock_analyst`/`us_validator` use deterministic fallbacks.
 
 Fetched AkShare daily history is stored incrementally in `state/stock_cache.db`; only missing date ranges are downloaded on later runs.
 
@@ -42,12 +44,24 @@ cd C:\repos\StockAI\portal-ui
 npm install
 npm run build
 cd ..
+
+cd C:\repos\StockAI\stockportal\ui
+npm install
+npm run build
+cd ..\..
 ```
 
 For frontend development:
 
 ```powershell
 cd C:\repos\StockAI\portal-ui
+npm run dev
+```
+
+Stock portal UI development:
+
+```powershell
+cd C:\repos\StockAI\stockportal\ui
 npm run dev
 ```
 
@@ -69,7 +83,11 @@ This starts:
 | Stock news agent | `http://127.0.0.1:8022` |
 | Stock analyst agent | `http://127.0.0.1:8023` |
 | Stock quant agent | `http://127.0.0.1:8024` |
-| Orchestrator | `http://127.0.0.1:8020` |
+| US data agent | `http://127.0.0.1:8026` |
+| US fundamental agent | `http://127.0.0.1:8027` |
+| US validator agent | `http://127.0.0.1:8028` |
+| A-share Orchestrator | `http://127.0.0.1:8020` |
+| US Orchestrator | `http://127.0.0.1:8029` |
 | Portal backend | `http://127.0.0.1:8030` |
 
 Open the system monitoring portal at `http://127.0.0.1:8030/`.
@@ -84,7 +102,11 @@ python -m main agent --manifest plugins/stock_data/agent.yaml
 python -m main agent --manifest plugins/stock_news/agent.yaml
 python -m main agent --manifest plugins/stock_quant/agent.yaml
 python -m main agent --manifest plugins/stock_analyst/agent.yaml
+python -m main agent --manifest plugins/us_data/agent.yaml
+python -m main agent --manifest plugins/us_fundamental/agent.yaml
+python -m main agent --manifest plugins/us_validator/agent.yaml
 python -m main orchestrator --manifest config/orchestration.yaml
+python -m main orchestrator --manifest config/orchestration_us.yaml --port 8029 --checkpoint-db state/orchestrator_us.db --queue-db state/orchestrator_queue_us.db
 python -m main portal
 python -m main stockportal
 ```
@@ -106,6 +128,23 @@ do {
 } while ($result.status -eq "running")
 
 $result.outputs.report
+```
+
+Submit a US stock to the independent US orchestrator:
+
+```powershell
+$run = Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8029/runs `
+  -ContentType application/json `
+  -Body '{"query":"AAPL"}'
+```
+
+Refresh a batch in the backend per market:
+
+```powershell
+python -m main refresh-reports --symbols AAPL,MSFT --market us
+python -m main refresh-reports --all --market us
 ```
 
 Cancel a running job:
