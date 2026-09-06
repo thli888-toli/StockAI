@@ -626,7 +626,15 @@ async def run_us_tool(
     key = f"{ticker}:{name}:{_today_key()}"
     if cache_seconds > 0:
         cached = US_CACHE.get("us_tool", key, cache_seconds)
-        if isinstance(cached, dict) and cached.get("payload") is not None:
+        cached_payload = cached.get("payload") if isinstance(cached, dict) else None
+        stale_empty_forecast = (
+            name == "get_us_earnings_forecast"
+            and isinstance(cached_payload, dict)
+            and not cached_payload.get("research_reports")
+            and cached_payload.get("consensus_growth") is None
+            and cached_payload.get("target_mean_price") is None
+        )
+        if cached_payload is not None and not stale_empty_forecast:
             return cached["payload"]
     if name == "estimate_fair_value":
         result = func(metrics or {}, ticker)
@@ -634,7 +642,13 @@ async def run_us_tool(
         result = await func(ticker, market_data)
     if not isinstance(result, dict):
         raise RuntimeError(f"工具 {name} 返回了非字典结果")
-    if cache_seconds > 0:
+    empty_forecast = (
+        name == "get_us_earnings_forecast"
+        and not result.get("research_reports")
+        and result.get("consensus_growth") is None
+        and result.get("target_mean_price") is None
+    )
+    if cache_seconds > 0 and not empty_forecast:
         US_CACHE.put("us_tool", key, {"payload": result})
     return result
 

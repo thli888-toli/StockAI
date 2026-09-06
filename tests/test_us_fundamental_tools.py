@@ -239,3 +239,23 @@ def test_handler_fails_when_core_tools_all_fail(monkeypatch):
                 TaskRequest(query="TEST", inputs={})
             )
         )
+
+
+def test_us_metrics_fill_sec_revenue_cagr_when_consensus_missing():
+    results = _base_results()
+    results["get_us_financial_statements"]["annual"] = [
+        {"end": "2023-09-30", "revenue": 100_000_000_000.0},
+        {"end": "2024-09-28", "revenue": 110_000_000_000.0},
+        {"end": "2025-09-27", "revenue": 121_000_000_000.0},
+    ]
+    forecast = dict(results["get_us_earnings_forecast"])
+    forecast["consensus_growth"] = None
+    forecast["research_reports"] = []
+    results["get_us_earnings_forecast"] = forecast
+    metrics = fundamental_service._build_metrics(
+        "TEST",
+        {"latest": {"close": 100.0}},
+        results,
+    )
+    assert metrics["revenue_growth_cagr"] == pytest.approx(0.10, abs=1e-9)
+    assert metrics["growth_source"] == "sec_3y_revenue_cagr"

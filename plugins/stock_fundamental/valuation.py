@@ -218,6 +218,25 @@ def _weighted_median(pairs: list[tuple[float, float]]) -> float:
     return ordered[-1][0]
 
 
+def _combine_prices(
+    pairs: list[tuple[float, float]],
+    mode: str = "weighted_median",
+) -> float:
+    """Combine method low/high/mid values honoring each method's weight.
+
+    ``weighted_median`` preserves the previous A-share behavior.  ``weighted_mean``
+    lets lower-weight methods (e.g. DCF) actually move the final range instead
+    of being swallowed by the highest-weight sample when only two methods are
+    available.
+    """
+    if mode == "weighted_mean":
+        total_weight = sum(weight for _, weight in pairs)
+        if total_weight <= 0:
+            return _weighted_median(pairs)
+        return sum(price * weight for price, weight in pairs) / total_weight
+    return _weighted_median(pairs)
+
+
 def _weighted_trimmed_mean(pairs: list[tuple[float, float]]) -> float:
     """Weighted mean after dropping the lowest and highest price samples.
 
@@ -1458,6 +1477,7 @@ def estimate_fair_value(
         cfg, "target_percentile", DEFAULT_TARGET_PERCENTILE
     )
     method_weights = dict(cfg.get("method_weights", METHOD_WEIGHTS))
+    combine_mode = str(cfg.get("combine_mode") or "weighted_median")
     outlier_band = [
         float(value)
         for value in cfg.get("outlier_band", [OUTLIER_LOW_FACTOR, OUTLIER_HIGH_FACTOR])
@@ -1525,6 +1545,7 @@ def estimate_fair_value(
                     "forecast_years": forecast_years,
                     "target_percentile": target_percentile,
                     "method_weights": dict(method_weights),
+                    "combine_mode": combine_mode,
                     "outlier_band": [outlier_low, outlier_high],
                     "config_source": config_source,
                     "config_overrides": list(config_overrides or []),
@@ -1579,6 +1600,7 @@ def estimate_fair_value(
                     "forecast_years": forecast_years,
                     "target_percentile": target_percentile,
                     "method_weights": dict(method_weights),
+                    "combine_mode": combine_mode,
                     "outlier_band": [outlier_low, outlier_high],
                     "config_source": config_source,
                     "config_overrides": list(config_overrides or []),
@@ -1587,14 +1609,25 @@ def estimate_fair_value(
             }
         raise ValueError("没有足够的财务数据计算合理股价估值")
 
-    prices = [float(method["price"]) for method in available]
-    median_price = float(statistics.median(prices))
+    weighted_pairs_all = [
+        (
+            method,
+            method_weights.get(method["method"], 1.0),
+        )
+        for method in available
+    ]
+    reference_price = _weighted_median(
+        [
+            (float(method["price"]), weight)
+            for method, weight in weighted_pairs_all
+        ]
+    )
     kept = [
         method
         for method in available
-        if outlier_low * median_price
+        if outlier_low * reference_price
         <= float(method["price"])
-        <= outlier_high * median_price
+        <= outlier_high * reference_price
     ]
     excluded = [method for method in available if method not in kept]
     if not kept:
@@ -1604,14 +1637,26 @@ def estimate_fair_value(
     weighted_pairs = [
         (method, method_weights.get(method["method"], 1.0)) for method in kept
     ]
-    low = _weighted_median(
-        [(float(method.get("low") or method["price"]), weight) for method, weight in weighted_pairs]
+    low = _combine_prices(
+        [
+            (float(method.get("low") or method["price"]), weight)
+            for method, weight in weighted_pairs
+        ],
+        combine_mode,
     )
-    high = _weighted_median(
-        [(float(method.get("high") or method["price"]), weight) for method, weight in weighted_pairs]
+    high = _combine_prices(
+        [
+            (float(method.get("high") or method["price"]), weight)
+            for method, weight in weighted_pairs
+        ],
+        combine_mode,
     )
-    mid = _weighted_median(
-        [(float(method["price"]), weight) for method, weight in weighted_pairs]
+    mid = _combine_prices(
+        [
+            (float(method["price"]), weight)
+            for method, weight in weighted_pairs
+        ],
+        combine_mode,
     )
     low = min(low, mid)
     high = max(high, mid)
@@ -1639,6 +1684,11 @@ def estimate_fair_value(
                 f"偏离 {margin:+.1%}，判断为{label}。"
             ),
         }
+        if label == "高估" and high > mid and current_price > high:
+            verdict["text"] += (
+                f"当前价同时高于估值区间上沿 "
+                f"{(_round(current_price / high - 1.0, 4) * 100):+.1f}%。"
+            )
 
     per_method: dict[str, dict[str, Any]] = {}
     for method in methods:
@@ -1666,6 +1716,7 @@ def estimate_fair_value(
             "forecast_years": forecast_years,
             "target_percentile": target_percentile,
             "method_weights": dict(method_weights),
+            "combine_mode": combine_mode,
             "outlier_band": [outlier_low, outlier_high],
             "config_source": config_source,
             "config_overrides": list(config_overrides or []),

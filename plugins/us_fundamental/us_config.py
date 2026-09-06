@@ -53,7 +53,12 @@ _FLOAT_KEYS = {
     "ddm_growth_cap",
 }
 _BOOL_KEYS = {"model_enabled", "skip_llm_peer_validation"}
-_STR_KEYS = {"config_version", "model_models_dir", "disclaimer"}
+_STR_KEYS = {
+    "config_version",
+    "model_models_dir",
+    "disclaimer",
+    "combine_mode",
+}
 _LIST_KEYS = {
     "sensitivity_rates",
     "outlier_band",

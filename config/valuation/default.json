@@ -1,5 +1,6 @@
 {
   "config_version": "1.0",
+  "combine_mode": "weighted_median",
   "discount_rate": 0.10,
   "terminal_growth": 0.02,
   "forecast_years": 5,

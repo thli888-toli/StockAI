@@ -52,6 +52,34 @@ def _per_share(value: Any, shares: float | None) -> float | None:
     return float(value) / shares
 
 
+def _revenue_cagr(annual_records: list[dict[str, Any]]) -> float | None:
+    """2-3 year revenue CAGR from SEC annual records."""
+    annuals = sorted(
+        [
+            (str(item.get("end") or ""), _num(item.get("revenue")))
+            for item in (annual_records or [])
+            if item.get("end") and _num(item.get("revenue")) is not None
+        ],
+        key=lambda item: item[0],
+    )
+    if len(annuals) < 2:
+        return None
+    latest_end, latest_revenue = annuals[-1]
+    latest_year = int(latest_end[:4])
+    older = next(
+        (item for item in reversed(annuals[:-1]) if latest_year - int(item[0][:4]) >= 2),
+        annuals[-2],
+    )
+    older_end, older_revenue = older
+    years = latest_year - int(older_end[:4])
+    if years <= 0 or older_revenue <= 0:
+        return None
+    try:
+        return (latest_revenue / older_revenue) ** (1.0 / years) - 1.0
+    except ZeroDivisionError:
+        return None
+
+
 def _fmt_bn(value: float | None, digits: int = 2) -> str:
     if value is None:
         return "—"
@@ -129,6 +157,31 @@ def _build_metrics(
 
     growth_yoy = _num(snapshot.get("earnings_growth"))
     revenue_yoy = _num(snapshot.get("revenue_growth"))
+    revenue_cagr = _revenue_cagr(statements.get("annual") or [])
+    annual_records = statements.get("annual") or []
+    earnings_annuals = sorted(
+        [
+            (str(item.get("end") or ""), _num(item.get("net_income")))
+            for item in annual_records
+            if item.get("end") and _num(item.get("net_income")) is not None
+        ],
+        key=lambda item: item[0],
+    )
+    earnings_cagr = None
+    if len(earnings_annuals) >= 2:
+        latest_end, latest_earnings = earnings_annuals[-1]
+        latest_year = int(latest_end[:4])
+        older = next(
+            (
+                item
+                for item in reversed(earnings_annuals[:-1])
+                if latest_year - int(item[0][:4]) >= 2
+            ),
+            earnings_annuals[-2],
+        )
+        years = latest_year - int(older[0][:4])
+        if years > 0 and older[1] and older[1] > 0 and latest_earnings > 0:
+            earnings_cagr = (latest_earnings / older[1]) ** (1.0 / years) - 1.0
     return {
         "symbol": ticker,
         "company_name": str(profile.get("company_name") or market_data.get("company_name") or ticker),
@@ -147,6 +200,15 @@ def _build_metrics(
         "net_profit_yoy": growth_yoy,
         "payout_ratio": payout_ratio,
         "revenue_growth_yoy": revenue_yoy,
+        "revenue_growth_cagr": revenue_cagr,
+        "earnings_growth_cagr": earnings_cagr,
+        "growth_source": (
+            "sec_3y_revenue_cagr"
+            if consensus_growth is None and revenue_cagr is not None
+            else "consensus_and_history"
+            if consensus_growth is not None
+            else ""
+        ),
         "forecast_growth": consensus_growth,
         "forecast_eps": forecast_eps,
         "forecast_year": forecast_year,
@@ -180,7 +242,9 @@ def _data_quality(metrics: dict[str, Any], warnings: list[str]) -> dict[str, Any
             "roe": metrics.get("roe"),
             "historical_percentile": bool(metrics.get("historical")),
             "peer_comparison": bool(metrics.get("industry_peers")),
-            "forecast": metrics.get("forecast_growth"),
+            "growth_anchor": (
+                metrics.get("forecast_growth") or metrics.get("revenue_growth_cagr")
+            ),
         }.items()
         if not value
     ]
@@ -249,6 +313,12 @@ def _report_section(analysis: dict[str, Any]) -> str:
             + (f"（{forecast.get('recommendation_key')}）" if forecast.get("recommendation_key") else "")
             + "。"
         )
+    elif metrics.get("revenue_growth_cagr") is not None:
+        lines.append(
+            "- 增长假设来源：Yahoo 一致预期暂不可用，采用 SEC 近 3 年营收 CAGR "
+            + _fmt_pct(metrics.get("revenue_growth_cagr"))
+            + "（历史口径，非一致预期）。"
+        )
 
     fair_value = valuation.get("fair_value_range") or {}
     verdict = valuation.get("verdict") or {}
@@ -296,6 +366,18 @@ def _report_section(analysis: dict[str, Any]) -> str:
             f"相对估值中枢偏离 {_fmt_pct(verdict.get('margin'), 1)}，"
             f"判断：{verdict.get('label', '—')}。"
         )
+        if (
+            metrics.get("current_price") is not None
+            and fair_value.get("high") is not None
+            and float(metrics["current_price"]) > float(fair_value["high"])
+        ):
+            above_high = (
+                float(metrics["current_price"]) / float(fair_value["high"]) - 1.0
+            )
+            lines.append(
+                f"  - 现价同时高于估值区间上沿 "
+                f"{above_high * 100:+.1f}%（上沿 {_fmt_price(fair_value.get('high'))} 美元）。"
+            )
     else:
         lines.append("- 合理股价估算：数据不足，无法给出估值区间。")
 
