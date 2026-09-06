@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from framework.config import ORCHESTRATOR_URL, REGISTRY_URL
+from framework.config import ORCHESTRATOR_URL, REGISTRY_URL, US_ORCHESTRATOR_URL
 
 
 class PortalAggregator:
@@ -16,11 +16,13 @@ class PortalAggregator:
         store,
         registry_url: str = REGISTRY_URL,
         orchestrator_url: str = ORCHESTRATOR_URL,
+        us_orchestrator_url: str = US_ORCHESTRATOR_URL,
         interval_seconds: float = 5.0,
     ) -> None:
         self.store = store
         self.registry_url = registry_url.rstrip("/")
         self.orchestrator_url = orchestrator_url.rstrip("/")
+        self.us_orchestrator_url = us_orchestrator_url.rstrip("/")
         self.interval_seconds = interval_seconds
 
     async def run_forever(self) -> None:
@@ -31,7 +33,8 @@ class PortalAggregator:
     async def collect_once(self) -> None:
         async with httpx.AsyncClient(timeout=3.0) as client:
             await self._collect_registry(client)
-            await self._collect_orchestrator(client)
+            await self._collect_orchestrator(client, "a", self.orchestrator_url)
+            await self._collect_orchestrator(client, "us", self.us_orchestrator_url)
 
     async def _collect_registry(self, client: httpx.AsyncClient) -> None:
         try:
@@ -56,32 +59,42 @@ class PortalAggregator:
         except Exception:
             return
 
-    async def _collect_orchestrator(self, client: httpx.AsyncClient) -> None:
+    async def _collect_orchestrator(
+        self,
+        client: httpx.AsyncClient,
+        market: str,
+        orchestrator_url: str,
+    ) -> None:
         try:
-            response = await client.get(f"{self.orchestrator_url}/graph")
+            response = await client.get(f"{orchestrator_url}/graph")
             response.raise_for_status()
-            self.store.set_graph(response.json())
+            self.store.set_graph(market, response.json())
         except Exception:
             pass
         try:
-            response = await client.get(f"{self.orchestrator_url}/graph-configs")
+            response = await client.get(f"{orchestrator_url}/graph-configs")
             response.raise_for_status()
-            self.store.set_graph_configs(response.json())
+            self.store.set_graph_configs(market, response.json())
         except Exception:
             pass
         try:
-            response = await client.get(f"{self.orchestrator_url}/metrics")
+            response = await client.get(f"{orchestrator_url}/metrics")
             response.raise_for_status()
-            self.store.insert_metric("orchestrator", response.json())
+            self.store.insert_metric(
+                "orchestrator_us" if market == "us" else "orchestrator",
+                response.json(),
+            )
         except Exception:
             pass
         try:
-            response = await client.get(f"{self.orchestrator_url}/runs")
+            response = await client.get(f"{orchestrator_url}/runs")
             response.raise_for_status()
             runs = response.json()
             for run in runs:
-                self.store.upsert_run(run)
+                item = dict(run)
+                item["market"] = market
+                self.store.upsert_run(item)
             known_ids = {run["run_id"] for run in runs}
-            self.store.mark_orphaned_running_runs_failed(known_ids)
+            self.store.mark_orphaned_running_runs_failed(known_ids, market)
         except Exception:
             pass

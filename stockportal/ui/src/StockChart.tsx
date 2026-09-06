@@ -25,6 +25,7 @@ function overallCn(overall: string): string {
 
 type StockChartProps = {
   symbol: string;
+  market?: "a" | "us";
   period?: Period;
   onPeriodChange?: (period: Period) => void;
   hideHeader?: boolean;
@@ -33,6 +34,7 @@ type StockChartProps = {
 
 export default function StockChart({
   symbol,
+  market = "a",
   period: controlledPeriod,
   onPeriodChange,
   hideHeader = false,
@@ -59,7 +61,7 @@ export default function StockChart({
       const token = getToken();
       if (token) headers.set("Authorization", `Bearer ${token}`);
       const response = await fetch(
-        `/api/watchlist/${encodeURIComponent(symbol)}/chart?period=${period}`,
+        `/api/watchlist/${encodeURIComponent(symbol)}/chart?period=${period}&market=${encodeURIComponent(market)}`,
         { headers }
       );
       if (!response.ok) {
@@ -91,14 +93,14 @@ export default function StockChart({
     return () => {
       cancelled = true;
     };
-  }, [symbol, period]);
+  }, [symbol, period, market]);
 
   const save = async () => {
     setError("");
     setSaveMessage("");
     setSaving(true);
     try {
-      await api.saveChart(symbol, period);
+      await api.saveChart(symbol, period, market);
       setSaveMessage("已保存");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : String(saveError));
@@ -108,6 +110,7 @@ export default function StockChart({
   };
 
   const fundamentalInfo = overview.fundamental;
+  const currency = market === "us" ? "美元" : "元";
 
   if (hideHeader) {
     return (
@@ -150,9 +153,9 @@ export default function StockChart({
         )}
         {fundamentalInfo && fundamentalInfo.mid_price != null && (
           <span className="overview-badge">
-            估值中枢：{fundamentalInfo.mid_price} 元
+            估值中枢：{fundamentalInfo.mid_price} {currency}
             {fundamentalInfo.current_price != null &&
-              ` · 当前价 ${fundamentalInfo.current_price} 元`}
+              ` · 当前价 ${fundamentalInfo.current_price} ${currency}`}
             {fundamentalInfo.deviation_pct != null &&
               `（偏离 ${fundamentalInfo.deviation_pct >= 0 ? "+" : ""}${fundamentalInfo.deviation_pct.toFixed(1)}%）`}
             {fundamentalInfo.verdict && ` · ${fundamentalInfo.verdict}`}

@@ -1,0 +1,13 @@
+apiVersion: agent-framework/v1
+kind: Agent
+name: us_data
+version: 1.0.0
+description: Loads US-stock OHLCV history (Yahoo Finance with Stooq fallback), company profile and normalized features.
+entrypoint: service:build_agent
+port: 8026
+capabilities:
+  streaming: false
+inputs:
+  query: string
+outputs:
+  artifact: string

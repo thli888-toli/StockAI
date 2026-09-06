@@ -50,33 +50,48 @@ function layoutGraph(graph: GraphData) {
 }
 
 export default function Orchestration({ runs }: { runs: RunSummary[] }) {
+  const [market, setMarket] = useState<"a" | "us">("a");
   const [graph, setGraph] = useState<GraphData | null>(null);
   const [configs, setConfigs] = useState<GraphConfig[]>([]);
   const [selectedConfig, setSelectedConfig] = useState("");
   const [applying, setApplying] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<string>("");
-  const [runFilter, setRunFilter] = useState("");
   const [selectedNode, setSelectedNode] = useState<{ id: string; agent: string } | null>(null);
   const [nodeLogs, setNodeLogs] = useState<LogRecord[]>([]);
-  const filteredRuns = useMemo(
-    () => (runFilter ? runs.filter((run) => run.graph_config === runFilter) : runs),
-    [runFilter, runs]
-  );
+
+  const marketOf = (run: RunSummary | undefined): "a" | "us" =>
+    run?.market === "us" || String(run?.graph_config || "").includes("us")
+      ? "us"
+      : "a";
   const selectedRun =
-    filteredRuns.find((run) => run.run_id === selectedRunId) ?? filteredRuns[0];
+    runs.find((run) => run.run_id === selectedRunId) ?? null;
+  const viewMarket = selectedRun ? marketOf(selectedRun) : market;
+  const viewManifest = selectedRun?.graph_config || undefined;
   const activeRunId = selectedRun?.run_id ?? "";
+  const viewKey = selectedRun
+    ? `${viewMarket}:${viewManifest || "active"}`
+    : `${market}:active`;
+
+  const switchMarketTab = (next: "a" | "us") => {
+    setMarket(next);
+    setSelectedRunId("");
+    setSelectedNode(null);
+  };
 
   useEffect(() => {
     let alive = true;
     const refresh = async () => {
       try {
-        const [data, nextConfigs] = await Promise.all([api.graph(), api.graphConfigs()]);
+        const [data, nextConfigs] = await Promise.all([
+          api.graph(viewMarket, viewManifest),
+          api.graphConfigs(viewMarket)
+        ]);
         if (alive) {
           setGraph(data);
           setConfigs(nextConfigs);
           const active = nextConfigs.find((config) => config.active);
-          if (active) setSelectedConfig((previous) => previous || active.name);
+          setSelectedConfig(active ? active.name : (viewManifest || ""));
         }
       } catch {
         // Backend may be unavailable.
@@ -88,7 +103,7 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
       alive = false;
       window.clearInterval(id);
     };
-  }, []);
+  }, [viewMarket, viewManifest, viewKey]);
 
   useEffect(() => {
     if (!selectedNode || !activeRunId) return;
@@ -133,9 +148,9 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
     setWaiting(false);
     setApplying(true);
     try {
-      const nextConfigs = await api.applyGraphConfig(selectedConfig);
+      const nextConfigs = await api.applyGraphConfig(selectedConfig, viewMarket);
       setConfigs(nextConfigs);
-      const data = await api.graph();
+      const data = await api.graph(viewMarket, viewManifest);
       setGraph(data);
     } catch (error) {
       console.error(error);
@@ -147,7 +162,7 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
   const cancelSelectedRun = async () => {
     if (!selectedRun) return;
     try {
-      await api.cancelRun(selectedRun.run_id);
+      await api.cancelRun(selectedRun.run_id, marketOf(selectedRun));
     } catch (error) {
       console.error(error);
     }
@@ -209,6 +224,20 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
     <section className="card">
       <h2>Orchestration Graph</h2>
       <div className="controls">
+        <button
+          className={viewMarket === "a" ? "active" : ""}
+          onClick={() => switchMarketTab("a")}
+        >
+          A 股
+        </button>
+        <button
+          className={viewMarket === "us" ? "active" : ""}
+          onClick={() => switchMarketTab("us")}
+        >
+          美股
+        </button>
+      </div>
+      <div className="controls">
         <select value={selectedConfig} onChange={(event) => setSelectedConfig(event.target.value)}>
           {configs.map((config) => (
             <option key={config.name} value={config.name}>
@@ -221,19 +250,20 @@ export default function Orchestration({ runs }: { runs: RunSummary[] }) {
         </button>
       </div>
       <div className="controls">
-        <select value={runFilter} onChange={(event) => setRunFilter(event.target.value)}>
-          <option value="">All configurations</option>
-          {configs.map((config) => (
-            <option key={config.name} value={config.name}>
-              {config.name}
-            </option>
-          ))}
-        </select>
-        <select value={selectedRun?.run_id ?? ""} onChange={(event) => setSelectedRunId(event.target.value)}>
+        <select
+          value={selectedRun?.run_id ?? ""}
+          onChange={(event) => {
+            const runId = event.target.value;
+            const job = runs.find((run) => run.run_id === runId);
+            setSelectedRunId(runId);
+            if (job) setMarket(marketOf(job));
+            setSelectedNode(null);
+          }}
+        >
           <option value="">Select job</option>
-          {filteredRuns.map((run) => (
+          {runs.map((run) => (
             <option key={run.run_id} value={run.run_id}>
-              {run.run_id.slice(0, 8)} — {run.status}
+              [{marketOf(run) === "us" ? "美股" : "A股"}] {run.run_id.slice(0, 8)} — {run.status}
               {run.graph_config ? ` — ${run.graph_config}` : ""}
             </option>
           ))}

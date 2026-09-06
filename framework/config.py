@@ -71,11 +71,13 @@ def env_url(name: str, default: str) -> str:
 
 REGISTRY_URL = env_url("REGISTRY_URL", "http://127.0.0.1:8001")
 ORCHESTRATOR_URL = env_url("ORCHESTRATOR_URL", "http://127.0.0.1:8020")
+US_ORCHESTRATOR_URL = env_url("US_ORCHESTRATOR_URL", "http://127.0.0.1:8029")
 PORTAL_BACKEND_URL = env_url("PORTAL_BACKEND_URL", "http://127.0.0.1:8030")
 STOCKPORTAL_URL = env_url("STOCKPORTAL_URL", "http://127.0.0.1:8040")
 CHECKPOINT_DB = os.getenv("CHECKPOINT_DB", "state/orchestrator.db")
 PORTAL_DB = os.getenv("PORTAL_DB", "state/portal.db")
 STOCK_CACHE_DB = os.getenv("STOCK_CACHE_DB", "state/stock_cache.db")
+US_STOCK_CACHE_DB = os.getenv("US_STOCK_CACHE_DB", "state/us_stock_cache.db")
 STOCK_PORTAL_DB = os.getenv("STOCK_PORTAL_DB", "state/stock_portal.db")
 RUN_QUEUE_DB = os.getenv("RUN_QUEUE_DB", "state/orchestrator_queue.db")
 

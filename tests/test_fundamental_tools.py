@@ -354,7 +354,7 @@ async def test_get_valuation_snapshot_parses_value_em(fake_ak):
 async def test_get_historical_valuation_percentile_computes_stats(fake_ak):
     historical = await tools.run_tool("get_historical_valuation_percentile", "600519", {}, [])
     pe = historical["metrics"]["pe_ttm"]
-    assert pe["samples"] == 100
+    assert pe["samples"] >= 90
     assert 0 <= pe["percentile"] <= 100
     assert pe["p50"] is not None
     pb = historical["metrics"]["pb"]

@@ -1,0 +1,14 @@
+apiVersion: agent-framework/v1
+kind: Agent
+name: us_fundamental
+version: 1.0.0
+description: Loads US financial reports (SEC EDGAR), consensus estimates and valuation quotes, then estimates a fair-value range in USD.
+entrypoint: service:build_agent
+port: 8027
+capabilities:
+  streaming: false
+inputs:
+  query: string
+  market_data: optional<string>
+outputs:
+  artifact: string

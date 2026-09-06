@@ -1,0 +1,32 @@
+version: 1
+name: us_stock_analysis
+entry: us_data
+nodes:
+  us_data:
+    type: agent
+    agent: us_data
+    input:
+      query: "{query}"
+    output_key: market_data
+  us_fundamental:
+    type: agent
+    agent: us_fundamental
+    input:
+      query: "{query}"
+      market_data: "{market_data}"
+    output_key: fundamental
+  us_validator:
+    type: agent
+    agent: us_validator
+    input:
+      query: "{query}"
+      market_data: "{market_data}"
+      fundamental: "{fundamental}"
+    output_key: report
+edges:
+  - from: us_data
+    to: us_fundamental
+  - from: us_fundamental
+    to: us_validator
+  - from: us_validator
+    to: END

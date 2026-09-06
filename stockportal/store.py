@@ -42,6 +42,7 @@ class WatchlistStore:
                 );
                 CREATE TABLE IF NOT EXISTS watchlist (
                     user_id TEXT NOT NULL,
+                    market TEXT NOT NULL DEFAULT 'a',
                     symbol TEXT NOT NULL,
                     company_name TEXT NOT NULL DEFAULT '',
                     industry TEXT NOT NULL DEFAULT '',
@@ -52,11 +53,12 @@ class WatchlistStore:
                     outputs TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    PRIMARY KEY(user_id, symbol)
+                    PRIMARY KEY(user_id, market, symbol)
                 );
                 CREATE TABLE IF NOT EXISTS chart_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT NOT NULL,
+                    market TEXT NOT NULL DEFAULT 'a',
                     symbol TEXT NOT NULL,
                     period TEXT NOT NULL,
                     label TEXT NOT NULL DEFAULT '',
@@ -109,6 +111,54 @@ class WatchlistStore:
                 self.conn.execute(
                     "ALTER TABLE watchlist ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'"
                 )
+            if "market" not in columns:
+                self.conn.executescript(
+                    """
+                    ALTER TABLE watchlist RENAME TO watchlist_legacy;
+                    CREATE TABLE watchlist (
+                        user_id TEXT NOT NULL,
+                        market TEXT NOT NULL DEFAULT 'a',
+                        symbol TEXT NOT NULL,
+                        company_name TEXT NOT NULL DEFAULT '',
+                        industry TEXT NOT NULL DEFAULT '',
+                        tags TEXT NOT NULL DEFAULT '[]',
+                        run_id TEXT,
+                        status TEXT NOT NULL DEFAULT 'running',
+                        error TEXT,
+                        outputs TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY(user_id, market, symbol)
+                    );
+                    INSERT INTO watchlist(
+                        user_id, market, symbol, company_name, industry, tags,
+                        run_id, status, error, outputs, created_at, updated_at
+                    )
+                    SELECT
+                        user_id, 'a', symbol, company_name, industry, tags,
+                        run_id, status, error, outputs, created_at, updated_at
+                    FROM watchlist_legacy;
+                    DROP TABLE watchlist_legacy;
+                    """
+                )
+                columns = {
+                    row["name"]
+                    for row in self.conn.execute("PRAGMA table_info(watchlist)")
+                }
+            snapshot_columns = {
+                row["name"]
+                for row in self.conn.execute("PRAGMA table_info(chart_snapshots)")
+            }
+            if "market" not in snapshot_columns:
+                self.conn.execute(
+                    "ALTER TABLE chart_snapshots ADD COLUMN market TEXT NOT NULL DEFAULT 'a'"
+                )
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_chart_snapshots_user_market_symbol
+                ON chart_snapshots(user_id, market, symbol, saved_at DESC)
+                """
+            )
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO users(id, openid, nickname, avatar, created_at)
@@ -151,21 +201,29 @@ class WatchlistStore:
         user_id: str,
         symbol: str,
         tags: list[str] | str | None,
+        market: str = "a",
     ) -> dict[str, Any] | None:
         """Replace the tag list of one watchlist row and return the item."""
         normalized = self._normalize_tags(tags)
         with self.lock, self.conn:
             self.conn.execute(
-                "UPDATE watchlist SET tags=?, updated_at=? WHERE user_id=? AND symbol=?",
-                (json.dumps(normalized, ensure_ascii=False), _now(), user_id, symbol),
+                "UPDATE watchlist SET tags=?, updated_at=? WHERE user_id=? AND market=? AND symbol=?",
+                (
+                    json.dumps(normalized, ensure_ascii=False),
+                    _now(),
+                    user_id,
+                    market,
+                    symbol,
+                ),
             )
-        return self.get(user_id, symbol)
+        return self.get(user_id, symbol, market)
 
     def upsert(
         self,
         user_id: str,
         symbol: str,
         *,
+        market: str = "a",
         run_id: str | None = None,
         status: str = "running",
         error: str | None = None,
@@ -176,7 +234,7 @@ class WatchlistStore:
     ) -> dict[str, Any]:
         outputs_json = json.dumps(outputs or {}, default=str)
         if tags is None:
-            existing = self.get(user_id, symbol)
+            existing = self.get(user_id, symbol, market)
             tags = (existing or {}).get("tags", [])
         tags_json = self._tags_json(tags)
         now = _now()
@@ -184,11 +242,11 @@ class WatchlistStore:
             self.conn.execute(
                 """
                 INSERT INTO watchlist(
-                    user_id, symbol, company_name, industry, tags, run_id, status, error,
-                    outputs, created_at, updated_at
+                    user_id, market, symbol, company_name, industry, tags,
+                    run_id, status, error, outputs, created_at, updated_at
                 )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, symbol) DO UPDATE SET
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, market, symbol) DO UPDATE SET
                     company_name=excluded.company_name,
                     industry=excluded.industry,
                     run_id=excluded.run_id,
@@ -200,6 +258,7 @@ class WatchlistStore:
                 """,
                 (
                     user_id,
+                    market,
                     symbol,
                     company_name,
                     industry,
@@ -212,8 +271,9 @@ class WatchlistStore:
                     now,
                 ),
             )
-        return self.get(user_id, symbol) or {
+        return self.get(user_id, symbol, market) or {
             "user_id": user_id,
+            "market": market,
             "symbol": symbol,
             "company_name": company_name,
             "industry": industry,
@@ -226,20 +286,36 @@ class WatchlistStore:
             "updated_at": now,
         }
 
-    def get(self, user_id: str, symbol: str) -> dict[str, Any] | None:
+    def get(
+        self,
+        user_id: str,
+        symbol: str,
+        market: str = "a",
+    ) -> dict[str, Any] | None:
         with self.lock:
             row = self.conn.execute(
-                "SELECT * FROM watchlist WHERE user_id=? AND symbol=?",
-                (user_id, symbol),
+                "SELECT * FROM watchlist WHERE user_id=? AND market=? AND symbol=?",
+                (user_id, market, symbol),
             ).fetchone()
         return self._item_from_row(row) if row else None
 
-    def all_items(self, user_id: str) -> list[dict[str, Any]]:
+    def all_items(
+        self,
+        user_id: str,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
         with self.lock:
-            rows = self.conn.execute(
-                "SELECT * FROM watchlist WHERE user_id=? ORDER BY created_at DESC",
-                (user_id,),
-            ).fetchall()
+            if market:
+                rows = self.conn.execute(
+                    "SELECT * FROM watchlist WHERE user_id=? AND market=? "
+                    "ORDER BY created_at DESC",
+                    (user_id, market),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT * FROM watchlist WHERE user_id=? ORDER BY market, created_at DESC",
+                    (user_id,),
+                ).fetchall()
         return [self._item_from_row(row) for row in rows]
 
     def all_by_symbol(self, symbol: str) -> list[dict[str, Any]]:
@@ -251,11 +327,16 @@ class WatchlistStore:
             ).fetchall()
         return [self._item_from_row(row) for row in rows]
 
-    def delete(self, user_id: str, symbol: str) -> bool:
+    def delete(
+        self,
+        user_id: str,
+        symbol: str,
+        market: str = "a",
+    ) -> bool:
         with self.lock, self.conn:
             cursor = self.conn.execute(
-                "DELETE FROM watchlist WHERE user_id=? AND symbol=?",
-                (user_id, symbol),
+                "DELETE FROM watchlist WHERE user_id=? AND market=? AND symbol=?",
+                (user_id, market, symbol),
             )
             return cursor.rowcount > 0
 
@@ -266,40 +347,45 @@ class WatchlistStore:
         period: str,
         payload: dict[str, Any],
         label: str = "",
+        market: str = "a",
     ) -> dict[str, Any]:
         now = _now()
         with self.lock, self.conn:
             cursor = self.conn.execute(
                 """
-                INSERT INTO chart_snapshots(user_id, symbol, period, label, payload, saved_at)
-                VALUES(?, ?, ?, ?, ?, ?)
+                INSERT INTO chart_snapshots(
+                    user_id, market, symbol, period, label, payload, saved_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
+                    market,
                     symbol,
                     period,
                     label or now,
                     json.dumps(payload, default=str),
                     now,
                 ),
-            )
+                )
             snapshot_id = int(cursor.lastrowid)
-            # Keep only the most recent 20 snapshots per user + symbol.
+            # Keep only the most recent 20 snapshots per user + market + symbol.
             self.conn.execute(
                 """
                 DELETE FROM chart_snapshots
-                WHERE user_id=? AND symbol=? AND id NOT IN (
+                WHERE user_id=? AND market=? AND symbol=? AND id NOT IN (
                     SELECT id FROM chart_snapshots
-                    WHERE user_id=? AND symbol=?
+                    WHERE user_id=? AND market=? AND symbol=?
                     ORDER BY saved_at DESC, id DESC
                     LIMIT 20
                 )
                 """,
-                (user_id, symbol, user_id, symbol),
+                (user_id, market, symbol, user_id, market, symbol),
             )
         return {
             "id": snapshot_id,
             "user_id": user_id,
+            "market": market,
             "symbol": symbol,
             "period": period,
             "label": label or now,
@@ -307,30 +393,37 @@ class WatchlistStore:
         }
 
     def list_chart_snapshots(
-        self, user_id: str, symbol: str
+        self,
+        user_id: str,
+        symbol: str,
+        market: str = "a",
     ) -> list[dict[str, Any]]:
         with self.lock:
             rows = self.conn.execute(
                 """
                 SELECT id, period, label, saved_at
                 FROM chart_snapshots
-                WHERE user_id=? AND symbol=?
+                WHERE user_id=? AND market=? AND symbol=?
                 ORDER BY saved_at DESC, id DESC
                 """,
-                (user_id, symbol),
+                (user_id, market, symbol),
             ).fetchall()
         return [dict(row) for row in rows]
 
     def get_chart_snapshot(
-        self, user_id: str, symbol: str, snapshot_id: int
+        self,
+        user_id: str,
+        symbol: str,
+        snapshot_id: int,
+        market: str = "a",
     ) -> dict[str, Any] | None:
         with self.lock:
             row = self.conn.execute(
                 """
                 SELECT * FROM chart_snapshots
-                WHERE user_id=? AND symbol=? AND id=?
+                WHERE user_id=? AND market=? AND symbol=? AND id=?
                 """,
-                (user_id, symbol, snapshot_id),
+                (user_id, market, symbol, snapshot_id),
             ).fetchone()
         if row is None:
             return None
@@ -339,14 +432,18 @@ class WatchlistStore:
         return item
 
     def delete_chart_snapshot(
-        self, user_id: str, symbol: str, snapshot_id: int
+        self,
+        user_id: str,
+        symbol: str,
+        snapshot_id: int,
+        market: str = "a",
     ) -> bool:
         with self.lock, self.conn:
             cursor = self.conn.execute(
                 """
                 DELETE FROM chart_snapshots
-                WHERE user_id=? AND symbol=? AND id=?
+                WHERE user_id=? AND market=? AND symbol=? AND id=?
                 """,
-                (user_id, symbol, snapshot_id),
+                (user_id, market, symbol, snapshot_id),
             )
             return cursor.rowcount > 0

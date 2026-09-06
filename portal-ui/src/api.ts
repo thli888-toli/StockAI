@@ -10,19 +10,27 @@ const json = async <T>(url: string): Promise<T> => {
 
 export const api = {
   agents: () => json<AgentStatus[]>("/api/agents"),
-  graph: () => json<GraphData>("/api/graph"),
-  graphConfigs: () => json<GraphConfig[]>("/api/graph-configs"),
-  applyGraphConfig: (name: string) =>
+  graph: (market: string = "a", manifest?: string) =>
+    json<GraphData>(
+      `/api/graph?market=${encodeURIComponent(market)}${
+        manifest ? `&manifest=${encodeURIComponent(manifest)}` : ""
+      }`
+    ),
+  graphConfigs: (market: string = "a") =>
+    json<GraphConfig[]>(`/api/graph-configs?market=${encodeURIComponent(market)}`),
+  applyGraphConfig: (name: string, market: string = "a") =>
     fetch("/api/graph-configs/apply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name })
+      body: JSON.stringify({ name, market })
     }).then((response) => {
       if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
       return response.json() as Promise<GraphConfig[]>;
     }),
-  cancelRun: (runId: string) =>
-    fetch(`/api/runs/${runId}/cancel`, { method: "POST" }).then((response) => {
+  cancelRun: (runId: string, market: string = "a") =>
+    fetch(`/api/runs/${runId}/cancel?market=${encodeURIComponent(market)}`, {
+      method: "POST"
+    }).then((response) => {
       if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
       return response.json() as Promise<RunSummary>;
     }),

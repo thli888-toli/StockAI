@@ -18,6 +18,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     orch_parser = sub.add_parser("orchestrator", help="Run the orchestrator")
     orch_parser.add_argument("--manifest", default="config/orchestration.yaml")
+    orch_parser.add_argument("--port", type=int, default=8020)
+    orch_parser.add_argument(
+        "--checkpoint-db",
+        default="state/orchestrator.db",
+        help="SQLite checkpoint DB path (per-market orchestrators should use separate files)",
+    )
+    orch_parser.add_argument(
+        "--queue-db",
+        default="state/orchestrator_queue.db",
+        help="SQLite run-queue DB path (per-market orchestrators should use separate files)",
+    )
 
     refresh_parser = sub.add_parser(
         "refresh-reports",
@@ -31,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     refresh_parser.add_argument("--orchestrator", default=None)
     refresh_parser.add_argument("--db", default=None)
+    refresh_parser.add_argument(
+        "--market",
+        choices=("a", "us"),
+        default="a",
+        help="Market to refresh: 'a' for A-share (default), 'us' for US stocks",
+    )
 
     train_parser = sub.add_parser(
         "train-valuation-model",
@@ -64,9 +81,14 @@ def main() -> int:
     elif args.command == "agent":
         run_agent(args.manifest)
     elif args.command == "orchestrator":
-        run_orchestrator(args.manifest)
+        run_orchestrator(
+            args.manifest,
+            port=args.port,
+            checkpoint_db=args.checkpoint_db,
+            queue_db=args.queue_db,
+        )
     elif args.command == "refresh-reports":
-        from framework.config import ORCHESTRATOR_URL, STOCK_PORTAL_DB
+        from framework.config import ORCHESTRATOR_URL, STOCK_PORTAL_DB, US_ORCHESTRATOR_URL
         from stockportal.refresh_reports import run_cli
 
         if not args.all and not args.symbols:
@@ -74,8 +96,13 @@ def main() -> int:
         return run_cli(
             args.symbols,
             args.all,
-            args.orchestrator or ORCHESTRATOR_URL,
+            (
+                US_ORCHESTRATOR_URL
+                if args.market == "us"
+                else args.orchestrator or ORCHESTRATOR_URL
+            ),
             args.db or STOCK_PORTAL_DB,
+            args.market,
         )
     elif args.command == "train-valuation-model":
         from plugins.stock_fundamental.valuation_model import train

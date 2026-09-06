@@ -1,0 +1,10 @@
+peers:
+  AAPL:
+    - {code: MSFT, name: Microsoft}
+    - {code: GOOGL, name: Alphabet}
+    - {code: AMZN, name: Amazon}
+    - {code: META, name: Meta Platforms}
+    - {code: NVDA, name: NVIDIA}
+    - {code: ORCL, name: Oracle}
+    - {code: CRM, name: Salesforce}
+    - {code: ADBE, name: Adobe}

@@ -813,3 +813,17 @@ def test_estimate_fair_value_excludes_outlier_method():
     assert result["excluded_methods"][0]["method"] == "dcf"
     assert result["fair_value_range"]["mid"] == pytest.approx(26.43, abs=0.01)
     assert result["fair_value_range"]["low"] <= result["fair_value_range"]["mid"]
+
+
+def test_estimate_fair_value_weighted_mean_applies_method_weights():
+    metrics = _metrics(dps=None, roe=None, payout_ratio=None)
+    result = estimate_fair_value(metrics, cfg={"combine_mode": "weighted_mean"})
+    assert result["assumptions"]["combine_mode"] == "weighted_mean"
+    per_method = result["per_method"]
+    expected_mid = (
+        per_method["relative"]["price"] * 1.0
+        + per_method["dcf"]["price"] * 0.8
+    ) / 1.8
+    assert result["fair_value_range"]["mid"] == pytest.approx(expected_mid, abs=0.01)
+    assert result["fair_value_range"]["low"] <= result["fair_value_range"]["mid"]
+    assert result["fair_value_range"]["mid"] <= result["fair_value_range"]["high"]
