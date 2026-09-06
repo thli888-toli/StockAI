@@ -6,6 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
@@ -73,10 +74,16 @@ def create_portal_app(
         return store.get_agents()
 
     @app.get("/api/graph")
-    def graph(market: str = Query(default="a")):
+    def graph(
+        market: str = Query(default="a"),
+        manifest: str | None = Query(default=None),
+    ):
         try:
             url = us_orchestrator_url if market == "us" else orchestrator_url
-            response = httpx.get(f"{url.rstrip('/')}/graph", timeout=3.0)
+            graph_url = f"{url.rstrip('/')}/graph"
+            if manifest:
+                graph_url += f"/{quote(manifest)}"
+            response = httpx.get(graph_url, timeout=3.0)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPError:

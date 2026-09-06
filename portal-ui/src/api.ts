@@ -10,8 +10,12 @@ const json = async <T>(url: string): Promise<T> => {
 
 export const api = {
   agents: () => json<AgentStatus[]>("/api/agents"),
-  graph: (market: string = "a") =>
-    json<GraphData>(`/api/graph?market=${encodeURIComponent(market)}`),
+  graph: (market: string = "a", manifest?: string) =>
+    json<GraphData>(
+      `/api/graph?market=${encodeURIComponent(market)}${
+        manifest ? `&manifest=${encodeURIComponent(manifest)}` : ""
+      }`
+    ),
   graphConfigs: (market: string = "a") =>
     json<GraphConfig[]>(`/api/graph-configs?market=${encodeURIComponent(market)}`),
   applyGraphConfig: (name: string, market: string = "a") =>

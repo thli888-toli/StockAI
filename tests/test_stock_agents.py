@@ -254,6 +254,25 @@ def test_two_orchestrators_use_separate_queues(tmp_path):
         asyncio.run(us.close())
 
 
+def test_orchestrator_graph_can_be_fetched_by_manifest_name(tmp_path):
+    from fastapi.testclient import TestClient
+    from framework.orchestrator import Orchestrator
+
+    orchestrator = Orchestrator(
+        manifest_path=str(ROOT / "config" / "orchestration_us.yaml"),
+        queue_db=str(tmp_path / "q.db"),
+        checkpoint_db=str(tmp_path / "c.db"),
+    )
+    app = orchestrator.build_app()
+    with TestClient(app) as client:
+        active = client.get("/graph").json()
+        by_name = client.get("/graph/orchestration_us.yaml").json()
+        assert active["name"] == "us_stock_analysis"
+        assert by_name["name"] == "us_stock_analysis"
+        assert set(by_name["nodes"]) == {"us_data", "us_fundamental", "us_validator"}
+        assert client.get("/graph/does_not_exist.yaml").status_code == 404
+
+
 def test_monthly_signal_combines_macd_and_ma():
     from plugins.stock_quant import service as quant_service
 
