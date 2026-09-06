@@ -307,8 +307,12 @@ def _report_section(analysis: dict[str, Any]) -> str:
         )
     forecast = analysis.get("forecast") or {}
     if forecast.get("consensus_growth") is not None:
+        source_label = {
+            "stockanalysis": "StockAnalysis 兜底",
+            "yfinance": "Yahoo Finance",
+        }.get(str(forecast.get("source") or ""), str(forecast.get("source") or "公开数据"))
         lines.append(
-            f"- 一致预期：盈利增速 {_fmt_pct(forecast.get('consensus_growth'))}，"
+            f"- 一致预期（{source_label}）：盈利增速 {_fmt_pct(forecast.get('consensus_growth'))}，"
             f"目标均价 {_fmt_price(forecast.get('target_mean_price'))} 美元"
             + (f"（{forecast.get('recommendation_key')}）" if forecast.get("recommendation_key") else "")
             + "。"

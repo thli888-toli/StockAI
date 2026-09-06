@@ -140,6 +140,27 @@ def test_peer_comparison_uses_config_peers_and_medians(monkeypatch):
     assert result["peer_count"] == 1
 
 
+def test_earnings_forecast_falls_back_to_stockanalysis(monkeypatch):
+    monkeypatch.setattr(tools, "yf_ticker_info", lambda ticker: {})
+    monkeypatch.setattr(
+        tools,
+        "stockanalysis_forecast",
+        lambda ticker: {
+            "research_reports": [
+                {"year": 2026, "eps_avg": 8.82},
+                {"year": 2027, "eps_avg": 9.54},
+            ],
+            "consensus_growth": 0.0816,
+            "source": "stockanalysis",
+            "note": "fallback",
+        },
+    )
+    result = asyncio.run(tools.run_us_tool("get_us_earnings_forecast", "TEST", {}))
+    assert result["source"] == "stockanalysis"
+    assert result["consensus_growth"] == 0.0816
+    assert result["research_reports"][1]["eps_avg"] == 9.54
+
+
 def test_valuation_snapshot_computes_missing_multiples_from_sec(monkeypatch):
     monkeypatch.setattr(
         tools,

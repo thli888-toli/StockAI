@@ -23,7 +23,11 @@ import yaml
 from framework.llm import llm_configured, llm_reply
 from plugins.stock_common import json_dumps, json_loads, run_blocking
 from plugins.us_cache import US_CACHE
-from plugins.us_common import yf_ticker_history, yf_ticker_info
+from plugins.us_common import (
+    stockanalysis_forecast,
+    yf_ticker_history,
+    yf_ticker_info,
+)
 from plugins.us_fundamental.edgar import (
     extract_financials,
     financials_summary,
@@ -415,25 +419,40 @@ def _fetch_earnings_forecast(ticker: str) -> dict[str, Any]:
     earnings_growth = _fraction(info.get("earningsGrowth"))
     revenue_growth = _fraction(info.get("revenueGrowth"))
     growth = earnings_growth if earnings_growth is not None else revenue_growth
-    reports: list[dict[str, Any]] = []
-    if forward_eps is not None:
-        reports.append(
-            {
-                "year": year,
-                "eps_avg": forward_eps,
-                "source": "yfinance",
-            }
-        )
-    return {
+    target_mean_price = _num(info.get("targetMeanPrice"))
+    recommendation_key = _text(info.get("recommendationKey"))
+    result: dict[str, Any] = {
         "symbol": ticker,
-        "research_reports": reports,
+        "research_reports": (
+            [{"year": year, "eps_avg": forward_eps, "source": "yfinance"}]
+            if forward_eps is not None
+            else []
+        ),
         "consensus_growth": growth,
         "earnings_growth": earnings_growth,
         "revenue_growth": revenue_growth,
-        "target_mean_price": _num(info.get("targetMeanPrice")),
-        "recommendation_key": _text(info.get("recommendationKey")),
+        "target_mean_price": target_mean_price,
+        "recommendation_key": recommendation_key,
         "source": "yfinance",
     }
+    useful = forward_eps is not None or growth is not None
+    if not useful:
+        try:
+            fallback = stockanalysis_forecast(ticker)
+        except Exception:
+            result["source"] = "unavailable"
+            return result
+        result.update(
+            {
+                "research_reports": fallback.get("research_reports") or [],
+                "consensus_growth": fallback.get("consensus_growth"),
+                "earnings_growth": fallback.get("earnings_growth"),
+                "revenue_growth": fallback.get("revenue_growth"),
+                "source": "stockanalysis",
+                "note": fallback.get("note"),
+            }
+        )
+    return result
 
 
 def _fetch_valuation_snapshot(ticker: str) -> dict[str, Any]:

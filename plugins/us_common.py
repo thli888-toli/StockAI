@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import re
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -122,7 +123,85 @@ def yahoo_chart_meta(ticker: str) -> dict[str, Any]:
         "previousClose": meta.get("previousClose") or meta.get("chartPreviousClose"),
         "source": "yahoo_chart_meta",
     }
-    return info
+
+
+def _parse_number_suffix(value: str) -> float | None:
+    match = re.match(r"^\s*([0-9][0-9,.]*)\s*([TBMK]?)\s*$", value, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        number = float(match.group(1).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    suffix = match.group(2).upper()
+    multiplier = {"T": 1e12, "B": 1e9, "M": 1e6, "K": 1e3}.get(suffix, 1.0)
+    return number * multiplier
+
+
+def _stockanalysis_parser(html_text: str) -> dict[str, Any]:
+    """Parse consensus snippets from a stockanalysis.com forecast page."""
+    text = re.sub(r"<[^>]+>", " ", html_text or "")
+    text = re.sub(r"\s+", " ", text)
+
+    def _find(pattern: str) -> float | None:
+        match = re.search(pattern, text)
+        if not match:
+            return None
+        return _parse_number_suffix(match.group(1))
+
+    eps_this = _find(r"EPS This Year\s+([0-9][0-9,.]*)\s+from")
+    eps_next = _find(r"EPS Next Year\s+([0-9][0-9,.]*)\s+from")
+    revenue_this = _find(r"Revenue This Year\s+([0-9][0-9,.]*[TBMK]?)\s+from")
+    revenue_next = _find(r"Revenue Next Year\s+([0-9][0-9,.]*[TBMK]?)\s+from")
+    if eps_this is None or eps_next is None:
+        raise ValueError("stockanalysis forecast page lacks EPS estimates")
+    growth = eps_next / eps_this - 1.0 if eps_this > 0 else None
+    revenue_growth = (
+        revenue_next / revenue_this - 1.0
+        if revenue_this and revenue_next and revenue_this > 0
+        else None
+    )
+    year = date.today().year
+    return {
+        "research_reports": [
+            {
+                "year": year,
+                "eps_avg": eps_this,
+                "fiscal_label": "this_year",
+                "source": "stockanalysis",
+            },
+            {
+                "year": year + 1,
+                "eps_avg": eps_next,
+                "fiscal_label": "next_year",
+                "source": "stockanalysis",
+            },
+        ],
+        "consensus_growth": growth,
+        "earnings_growth": growth,
+        "revenue_growth": revenue_growth,
+        "eps_this_year": eps_this,
+        "eps_next_year": eps_next,
+        "revenue_this_year": revenue_this,
+        "revenue_next_year": revenue_next,
+        "source": "stockanalysis",
+        "note": "stockanalysis.com 一致预期兜底（年份按当前日历年估算）",
+    }
+
+
+def stockanalysis_forecast(ticker: str) -> dict[str, Any]:
+    """Consensus-forecast fallback from stockanalysis.com (public, non-China)."""
+    import requests
+
+    symbol = yahoo_symbol(ticker).lower()
+    url = f"https://stockanalysis.com/stocks/{symbol}/forecast/"
+    response = requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=20.0,
+    )
+    response.raise_for_status()
+    return _stockanalysis_parser(response.text)
 
 
 def yahoo_chart_history(
@@ -250,6 +329,8 @@ __all__ = [
     "yahoo_symbol",
     "display_symbol",
     "yahoo_chart_history",
+    "stockanalysis_forecast",
+    "_stockanalysis_parser",
     "yf_ticker_info",
     "yf_ticker_history",
     "stooq_daily_history",

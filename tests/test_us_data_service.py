@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from framework.schemas import TaskRequest  # noqa: E402
 from plugins.stock_common import normalize_akshare_frame, resample_ohlcv  # noqa: E402
-from plugins.us_common import validate_us_symbol  # noqa: E402
+from plugins.us_common import _stockanalysis_parser, validate_us_symbol  # noqa: E402
 from plugins.us_data import service as us_data_service  # noqa: E402
 
 
@@ -40,6 +40,22 @@ def test_validate_us_symbol_accepts_letters_and_rejects_cn_code():
     assert validate_us_symbol("BRK.B") == "BRK.B"
     with pytest.raises(ValueError):
         validate_us_symbol("600519")
+
+
+def test_stockanalysis_parser_extracts_consensus_estimates():
+    html = """
+      <div>Revenue This Year 477.67B from 416.16B</div>
+      <div>Revenue Next Year 525.25B from 477.67B</div>
+      <div>EPS This Year 8.82 from 7.46</div>
+      <div>EPS Next Year 9.54 from 8.82</div>
+    """
+    parsed = _stockanalysis_parser(html)
+    assert parsed["source"] == "stockanalysis"
+    assert parsed["eps_this_year"] == 8.82
+    assert parsed["eps_next_year"] == 9.54
+    assert parsed["revenue_this_year"] == 477_670_000_000.0
+    assert parsed["consensus_growth"] == pytest.approx(0.081632653, abs=1e-9)
+    assert len(parsed["research_reports"]) == 2
 
 
 def test_us_data_payload_uses_usd_and_normalized_features(monkeypatch, tmp_path):
