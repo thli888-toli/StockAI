@@ -1,0 +1,5 @@
+{
+  "config_version": "1.0",
+  "growth_leader_threshold": 0.15,
+  "target_percentile": 0.25
+}
