@@ -1,0 +1,10 @@
+{
+  "config_version": "1.0",
+  "manual_peers": [
+    {"code": "AMD", "name": "AMD"},
+    {"code": "AVGO", "name": "Broadcom"}
+  ],
+  "leader_forward_pe": 25.0,
+  "leader_pb_enabled": false,
+  "leader_use_ttm_pe_history": false
+}
