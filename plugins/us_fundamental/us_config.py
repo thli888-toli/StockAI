@@ -64,6 +64,7 @@ _STR_KEYS = {
     "model_models_dir",
     "disclaimer",
     "combine_mode",
+    "primary_method",
 }
 _LIST_KEYS = {
     "sensitivity_rates",
@@ -74,7 +75,11 @@ _LIST_KEYS = {
     "manual_peers",
     "peg_band",
 }
-_DICT_KEYS = {"method_weights", "manual_fair_value"}
+_DICT_KEYS = {
+    "method_weights",
+    "manual_fair_value",
+    "industry_primary_methods",
+}
 
 _cache: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()

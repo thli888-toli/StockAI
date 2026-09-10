@@ -853,3 +853,34 @@ def test_growth_leader_manual_forward_pe_anchor():
     detail = {item["metric"]: item for item in result["detail"]}
     assert "pe_ttm_fwd_leader" in detail
     assert detail["pe_ttm_fwd_leader"]["target_source"] == "个股配置目标前瞻PE"
+
+
+def test_primary_method_pb_restricts_relative_central():
+    result = relative_valuation(_metrics(), cfg={"primary_method": "pb"})
+    assert result["basis"] == "主方法：PB"
+    weighted = [
+        item for item in result["detail"] if item.get("weight", 0) > 0
+    ]
+    assert weighted
+    assert all(str(item["metric"]).startswith("pb") for item in weighted)
+    assert result["price"] == pytest.approx(23.33, abs=0.01)
+
+
+def test_industry_primary_methods_keyword_resolution():
+    result = relative_valuation(
+        _metrics(industry_name="银行"),
+        cfg={"industry_primary_methods": {"银行": "pb"}},
+    )
+    assert result["basis"] == "主方法：PB"
+
+
+def test_primary_method_dcf_overrides_method_combination():
+    result = estimate_fair_value(_metrics(), cfg={"primary_method": "dcf"})
+    assert result["available_methods"] == ["dcf"]
+    assert result["fair_value_range"]["mid"] == pytest.approx(
+        result["per_method"]["dcf"]["price"],
+        abs=0.01,
+    )
+    assert any(
+        item["method"] == "relative" for item in result["excluded_methods"]
+    )

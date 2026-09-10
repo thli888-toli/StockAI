@@ -111,6 +111,42 @@
 
 ---
 
+## 行业主方法（primary_method / industry_primary_methods）
+
+券商做法是按行业固定主方法，其余方法只做参考。本项目已支持配置化：
+
+- `primary_method`：个股主方法，可选 `pe_ttm`、`pb`、`ps`、`dcf`、`ddm`、`relative` 或 `""`（自动，多方法综合）。
+- `industry_primary_methods`：行业关键词 → 主方法 的映射；未配置个股 `primary_method` 时按行业名关键词匹配，先命中先用。
+- 生效方式：主方法为 `pe_ttm/pb/ps` 时，相对估值只用该口径（含其历史/模型锚）形成中枢与区间，其它口径权重置 0 仅作参考；
+  主方法为 `dcf/ddm/relative` 时，综合估值只采用该方法，其余方法列入 excluded_methods 说明为参考。
+- 默认两个参数为空，行为与之前完全一致。
+
+示例（个股文件 `config/valuation/{symbol}.json` 或美股 `config/valuation/us/{TICKER}.json`）：
+
+```json
+{
+  "industry_primary_methods": {
+    "银行": "pb",
+    "保险": "pb",
+    "电力": "ddm",
+    "煤炭": "pb"
+  },
+  "primary_method": "pe_ttm"
+}
+```
+
+美股高增长/GAAP 失真标的常用组合：
+
+```json
+{
+  "leader_forward_pe": 55,
+  "leader_pb_enabled": false,
+  "leader_use_ttm_pe_history": false
+}
+```
+
+---
+
 ## 排查与微调流程
 
 1. 先看报告里的"目标倍数层级/口径明细/notes"，定位是哪条口径在压低或抬高中枢。
