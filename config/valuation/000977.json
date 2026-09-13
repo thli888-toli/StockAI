@@ -1,0 +1,12 @@
+{
+  "config_version": "1.0",
+  "primary_method": "pb",
+  "model_enabled": false,
+  "skip_llm_peer_validation": true,
+  "manual_peers": [
+    {"code": "603019", "name": "中科曙光"},
+    {"code": "000938", "name": "紫光股份"},
+    {"code": "000034", "name": "神州数码"},
+    {"code": "601138", "name": "工业富联"}
+  ]
+}
