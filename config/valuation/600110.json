@@ -1,3 +1,16 @@
 {
-  "target_percentile": 0.75
+  "config_version": "1.0",
+  "manual_peers": [
+    {"code": "688388", "name": "嘉元科技"},
+    {"code": "301150", "name": "中一科技"},
+    {"code": "301217", "name": "铜冠铜箔"},
+    {"code": "301511", "name": "德福科技"},
+    {"code": "002203", "name": "海亮股份"},
+    {"code": "603527", "name": "众源新材"}
+  ],
+  "skip_llm_peer_validation": true,
+  "leader_forward_pe": 30.0,
+  "leader_pb_enabled": false,
+  "leader_use_ttm_pe_history": false,
+  "model_enabled": false
 }

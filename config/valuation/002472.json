@@ -1,3 +1,19 @@
 {
-  "peg_factor": 2.0
+  "config_version": "1.0",
+  "manual_peers": [
+    {"code": "300258", "name": "精锻科技"},
+    {"code": "603767", "name": "中马传动"},
+    {"code": "002765", "name": "蓝黛科技"},
+    {"code": "603809", "name": "豪能股份"},
+    {"code": "002708", "name": "光洋股份"},
+    {"code": "002434", "name": "万里扬"},
+    {"code": "603178", "name": "圣龙股份"},
+    {"code": "605133", "name": "嵘泰股份"}
+  ],
+  "skip_llm_peer_validation": true,
+  "growth_leader_threshold": 0.14,
+  "leader_forward_pe": 21.0,
+  "leader_pb_enabled": false,
+  "leader_use_ttm_pe_history": false,
+  "model_enabled": false
 }

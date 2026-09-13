@@ -119,6 +119,26 @@ export default function KLineChartView({ payload }: { payload: ChartPayload }) {
         deviation == null
           ? ""
           : `（${deviation >= 0 ? "+" : ""}${deviation.toFixed(1)}%）`;
+      if (payload.fundamental.low != null) {
+        candleSeries.createPriceLine({
+          price: payload.fundamental.low,
+          color: "#b39ddb",
+          lineWidth: 1,
+          lineStyle: 3,
+          axisLabelVisible: false,
+          title: `估值下沿 ${payload.fundamental.low}`,
+        });
+      }
+      if (payload.fundamental.high != null) {
+        candleSeries.createPriceLine({
+          price: payload.fundamental.high,
+          color: "#b39ddb",
+          lineWidth: 1,
+          lineStyle: 3,
+          axisLabelVisible: false,
+          title: `估值上沿 ${payload.fundamental.high}`,
+        });
+      }
       candleSeries.createPriceLine({
         price: payload.fundamental.mid_price,
         color: "#9013fe",
@@ -153,6 +173,13 @@ export default function KLineChartView({ payload }: { payload: ChartPayload }) {
         deviation == null
           ? ""
           : `（${deviation >= 0 ? "+" : ""}${deviation.toFixed(1)}%）`;
+      if (payload.fundamental.low != null && payload.fundamental.high != null) {
+        legendItems.push({
+          label: "估值区间",
+          value: `${payload.fundamental.low}–${payload.fundamental.high}`,
+          color: "#b39ddb",
+        });
+      }
       legendItems.push({
         label: "中枢",
         value: `${payload.fundamental.mid_price}${deviationText}`,

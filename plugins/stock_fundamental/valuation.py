@@ -86,6 +86,33 @@ def _cfg_int(cfg: dict[str, Any], key: str, default: int) -> int:
         return int(default)
 
 
+def _resolve_primary_method(
+    metrics: dict[str, Any],
+    cfg: dict[str, Any] | None = None,
+) -> str:
+    """Resolve the configured primary valuation method.
+
+    Per-ticker ``primary_method`` wins; otherwise the first keyword match in
+    ``industry_primary_methods`` against ``metrics.industry_name`` is used.
+    Empty string means "auto" (current multi-method behavior).
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    allowed = {"", "auto", "relative", "pe_ttm", "pb", "ps", "dcf", "ddm"}
+    explicit = str(cfg.get("primary_method") or "").strip().lower()
+    if explicit in allowed and explicit not in ("", "auto"):
+        return explicit
+    mapping = cfg.get("industry_primary_methods") or {}
+    if not isinstance(mapping, dict):
+        return ""
+    industry = str(metrics.get("industry_name") or "").lower()
+    for keyword, method in mapping.items():
+        key = str(keyword or "").strip().lower()
+        value = str(method or "").strip().lower()
+        if key and key in industry and value in allowed and value not in ("", "auto"):
+            return value
+    return ""
+
+
 def _model_multiple(model: dict[str, Any], key: str) -> float | None:
     """Positive model-predicted target multiple for a per-share metric key."""
     if not isinstance(model, dict) or not model.get("available"):
@@ -331,6 +358,11 @@ def _growth_leader_relative(
     forecast_year = metrics.get("forecast_year")
     current_price = _num(metrics.get("current_price"))
     forward_pe = _resolve_forward_pe(peers, forecast_year)
+    manual_forward_pe = _cfg_float(cfg, "leader_forward_pe", 0.0)
+    forward_pe_is_manual = False
+    if forward_pe is None and manual_forward_pe > 0:
+        forward_pe = manual_forward_pe
+        forward_pe_is_manual = True
     growth_leader_threshold = _cfg_float(
         cfg, "growth_leader_threshold", GROWTH_LEADER_THRESHOLD
     )
@@ -350,6 +382,10 @@ def _growth_leader_relative(
     )
     leader_primary_min_weight = _cfg_float(
         cfg, "leader_primary_min_weight", 1.0
+    )
+    leader_pb_enabled = bool(cfg.get("leader_pb_enabled", True))
+    leader_use_ttm_pe_history = bool(
+        cfg.get("leader_use_ttm_pe_history", True)
     )
     has_forward = (
         forward_eps is not None
@@ -500,7 +536,11 @@ def _growth_leader_relative(
                         "name": "PE(forward 龙头主锚)",
                         "base": _round(forward_eps),
                         "target_multiple": _round(forward_pe),
-                        "target_source": "类似公司中位数(forward PE)",
+                        "target_source": (
+                            "个股配置目标前瞻PE"
+                            if forward_pe_is_manual
+                            else "类似公司中位数(forward PE)"
+                        ),
                         "implied_price": _round(fwd_implied),
                         "implied_low": _round(fwd_implied * (1.0 - target_band)),
                         "implied_high": _round(fwd_implied * (1.0 + target_band)),
@@ -508,7 +548,12 @@ def _growth_leader_relative(
                     },
                 ),
             )
-        if bps is not None and bps > 0 and pb_anchor is not None:
+        if (
+            leader_pb_enabled
+            and bps is not None
+            and bps > 0
+            and pb_anchor is not None
+        ):
             pb_implied = bps * pb_anchor
             estimates.append(
                 (
@@ -529,18 +574,20 @@ def _growth_leader_relative(
                     },
                 ),
             )
-        add_own_history_anchor(
-            "pe_ttm",
-            eps_ttm,
-            leader_history_weight,
-            forward_pe * leader_history_cap_factor,
-        )
-        add_own_history_anchor(
-            "pb",
-            bps,
-            leader_history_weight,
-            pb_anchor * leader_history_cap_factor if pb_anchor else None,
-        )
+        if leader_use_ttm_pe_history:
+            add_own_history_anchor(
+                "pe_ttm",
+                eps_ttm,
+                leader_history_weight,
+                forward_pe * leader_history_cap_factor,
+            )
+        if leader_pb_enabled:
+            add_own_history_anchor(
+                "pb",
+                bps,
+                leader_history_weight,
+                pb_anchor * leader_history_cap_factor if pb_anchor else None,
+            )
     else:
         add_own_history_anchor("pe_ttm", eps_ttm, 1.0)
         add_own_history_anchor("pb", bps, 1.0)
@@ -570,6 +617,26 @@ def _growth_leader_relative(
 
     if not estimates:
         return None
+
+    primary_method = _resolve_primary_method(metrics, cfg)
+    central_estimates = estimates
+    if primary_method in ("pe_ttm", "pb", "ps"):
+        filtered = [
+            estimate
+            for estimate in estimates
+            if str((estimate[4] or {}).get("metric") or "").startswith(primary_method)
+        ]
+        if filtered:
+            central_estimates = filtered
+            for estimate in estimates:
+                if estimate not in central_estimates:
+                    estimate[4]["weight"] = 0
+            notes.append(
+                f"按主方法配置仅用 "
+                f"{ {'pe_ttm': 'PE-TTM', 'pb': 'PB', 'ps': 'PS'}[primary_method] } "
+                "口径形成中枢与区间，"
+                "其它口径仅作参考。"
+            )
 
     peer_source = (
         "手动指定类似公司中位数"
@@ -608,24 +675,30 @@ def _growth_leader_relative(
 
     if has_forward:
         mid = _weighted_trimmed_mean(
-            [(estimate[0], estimate[3]) for estimate in estimates]
+            [(estimate[0], estimate[3]) for estimate in central_estimates]
         )
         basis = "forward PE + PB(高成长龙头)"
-        low = min(estimate[1] for estimate in estimates)
-        high = max(estimate[2] for estimate in estimates)
+        low = min(estimate[1] for estimate in central_estimates)
+        high = max(estimate[2] for estimate in central_estimates)
     else:
         # 可靠主锚取中位：低权重的本地模型/历史校准锚只作参考，
         # 不参与无 forward 数据时的龙头中枢与区间计算；阈值由参数
         # leader_primary_min_weight 控制（调低即可让参考锚参与中枢）。
         primary = [
             estimate
-            for estimate in estimates
+            for estimate in central_estimates
             if estimate[3] >= leader_primary_min_weight
-        ] or estimates
+        ] or central_estimates
         mid = float(statistics.median([estimate[0] for estimate in primary]))
         basis = "自身历史50分位(高成长龙头)"
         low = min(estimate[1] for estimate in primary)
         high = max(estimate[2] for estimate in primary)
+    if primary_method in ("pe_ttm", "pb", "ps"):
+        basis = "主方法：" + {
+            "pe_ttm": "PE-TTM",
+            "pb": "PB",
+            "ps": "PS",
+        }[primary_method]
 
     peer_names = [
         str(item.get("name"))
@@ -1198,6 +1271,23 @@ def relative_valuation(
             "method": "relative",
             "notes": notes + ["缺少足够的倍数或每股指标，相对估值不可用。"],
         }
+    primary_method = _resolve_primary_method(metrics, cfg)
+    central_estimates = estimates
+    if primary_method in ("pe_ttm", "pb", "ps"):
+        filtered = [
+            estimate
+            for estimate in estimates
+            if str((estimate[4] or {}).get("metric") or "").startswith(primary_method)
+        ]
+        if filtered:
+            central_estimates = filtered
+            for estimate in estimates:
+                if estimate not in central_estimates:
+                    estimate[4]["weight"] = 0
+            notes.append(
+                f"按主方法配置仅用 {names[primary_method]} 口径形成中枢与区间，"
+                "其它口径仅作参考。"
+            )
     history_blends = [
         estimate[4]
         for estimate in estimates
@@ -1217,9 +1307,9 @@ def relative_valuation(
         )
     primary_estimates = [
         estimate[4]
-        for estimate in estimates
+        for estimate in central_estimates
         if estimate[3] >= 1.0
-    ] or [estimate[4] for estimate in estimates]
+    ] or [estimate[4] for estimate in central_estimates]
     source_counts = Counter(item["target_source"] for item in primary_estimates)
     primary_source = source_counts.most_common(1)[0][0] if source_counts else ""
     if primary_source == "自身历史50分位":
@@ -1262,22 +1352,27 @@ def relative_valuation(
         "method": "relative",
         "price": _round(
             _weighted_trimmed_mean(
-                [(estimate[0], estimate[3]) for estimate in estimates]
+                [(estimate[0], estimate[3]) for estimate in central_estimates]
             )
         ),
         "low": _round(
             _weighted_trimmed_mean(
-                [(estimate[1], estimate[3]) for estimate in estimates]
+                [(estimate[1], estimate[3]) for estimate in central_estimates]
             )
         ),
         "high": _round(
             _weighted_trimmed_mean(
-                [(estimate[2], estimate[3]) for estimate in estimates]
+                [(estimate[2], estimate[3]) for estimate in central_estimates]
             )
         ),
         "detail": [estimate[4] for estimate in estimates] + reference_details,
         "notes": notes,
-        "basis": primary_source,
+        "basis": (
+            f"主方法：{names[primary_method]}"
+            if primary_method in ("pe_ttm", "pb", "ps")
+            and central_estimates is not estimates
+            else primary_source
+        ),
         "peer_names": peer_names,
         "peer_count": len(peer_names) if peer_names else None,
     }
@@ -1587,6 +1682,25 @@ def estimate_fair_value(
         ddm_valuation(metrics, cfg),
     ]
     available = [method for method in methods if method.get("available")]
+    primary_method = _resolve_primary_method(metrics, cfg)
+    forced_primary_references: list[dict[str, Any]] = []
+    if primary_method:
+        forced: dict[str, Any] | None = None
+        if primary_method in ("dcf", "ddm"):
+            forced = next(
+                (method for method in available if method["method"] == primary_method),
+                None,
+            )
+        elif primary_method in ("relative", "pe_ttm", "pb", "ps"):
+            forced = next(
+                (method for method in available if method["method"] == "relative"),
+                None,
+            )
+        if forced is not None:
+            forced_primary_references = [
+                method for method in available if method is not forced
+            ]
+            available = [forced]
     if not available:
         restructuring = next(
             (method for method in methods if method.get("restructuring_in_progress")),
@@ -1657,6 +1771,10 @@ def estimate_fair_value(
     if not kept:
         kept = available
         excluded = []
+    for reference in forced_primary_references:
+        item = dict(reference)
+        item["notes"] = ["非主方法，仅作参考"] + list(reference.get("notes") or [])
+        excluded.append(item)
 
     weighted_pairs = [
         (method, method_weights.get(method["method"], 1.0)) for method in kept
@@ -1741,6 +1859,7 @@ def estimate_fair_value(
             "target_percentile": target_percentile,
             "method_weights": dict(method_weights),
             "combine_mode": combine_mode,
+            "primary_method": primary_method,
             "outlier_band": [outlier_low, outlier_high],
             "config_source": config_source,
             "config_overrides": list(config_overrides or []),

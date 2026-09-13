@@ -152,14 +152,21 @@ export default function StockChart({
           </span>
         )}
         {fundamentalInfo && fundamentalInfo.mid_price != null && (
-          <span className="overview-badge">
-            估值中枢：{fundamentalInfo.mid_price} {currency}
-            {fundamentalInfo.current_price != null &&
-              ` · 当前价 ${fundamentalInfo.current_price} ${currency}`}
-            {fundamentalInfo.deviation_pct != null &&
-              `（偏离 ${fundamentalInfo.deviation_pct >= 0 ? "+" : ""}${fundamentalInfo.deviation_pct.toFixed(1)}%）`}
-            {fundamentalInfo.verdict && ` · ${fundamentalInfo.verdict}`}
-          </span>
+          <>
+            {fundamentalInfo.low != null && fundamentalInfo.high != null && (
+              <span className="overview-badge">
+                估值区间：{fundamentalInfo.low}–{fundamentalInfo.high} {currency}
+              </span>
+            )}
+            <span className="overview-badge">
+              估值中枢：{fundamentalInfo.mid_price} {currency}
+              {fundamentalInfo.current_price != null &&
+                ` · 当前价 ${fundamentalInfo.current_price} ${currency}`}
+              {fundamentalInfo.deviation_pct != null &&
+                `（偏离 ${fundamentalInfo.deviation_pct >= 0 ? "+" : ""}${fundamentalInfo.deviation_pct.toFixed(1)}%）`}
+              {fundamentalInfo.verdict && ` · ${fundamentalInfo.verdict}`}
+            </span>
+          </>
         )}
       </div>
       {data && <KLineChartView payload={data} />}
