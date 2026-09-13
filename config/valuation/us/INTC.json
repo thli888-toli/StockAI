@@ -1,0 +1,9 @@
+{
+  "config_version": "1.0",
+  "manual_peers": [
+    {"code": "AMD", "name": "AMD"}
+  ],
+  "leader_forward_pe": 55.0,
+  "leader_pb_enabled": false,
+  "leader_use_ttm_pe_history": false
+}
