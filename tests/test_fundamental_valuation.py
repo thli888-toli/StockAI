@@ -322,6 +322,20 @@ def test_target_percentile_selects_leader_history_anchor():
     assert default["price"] == pytest.approx(30.5, abs=0.01)
 
 
+def test_target_percentile_selects_main_path_history_anchor():
+    metrics = _metrics(industry_peers={}, industry_bench={})
+    # fixture history: pe p25=14/p50=18/p75=22, pb p25=2/p50=2.5/p75=3
+    p75 = relative_valuation(metrics, cfg={"target_percentile": 0.75})
+    # PE 2*22=44, PB 10*3=30 -> weighted mean 37
+    assert p75["price"] == pytest.approx(37.0, abs=0.01)
+    detail = {item["metric"]: item for item in p75["detail"]}
+    assert detail["pe_ttm"]["target_source"] == "自身历史75分位"
+    assert detail["pb"]["target_source"] == "自身历史75分位"
+    default = relative_valuation(metrics)
+    # Default 0.5 keeps the p50 anchors: PE 36, PB 25 -> 30.5
+    assert default["price"] == pytest.approx(30.5, abs=0.01)
+
+
 def test_leader_branch_drops_pe_anchor_on_cyclical_boom():
     metrics = _metrics(
         forecast_growth=0.35,
@@ -333,6 +347,27 @@ def test_leader_branch_drops_pe_anchor_on_cyclical_boom():
     assert "pe_ttm_hist_leader" not in detail
     assert detail["pb_hist_leader"]["target_multiple"] == 2.5
     assert result["price"] == pytest.approx(25.0, abs=0.01)
+    assert any("周期景气高点" in note for note in result["notes"])
+
+
+def test_leader_cyclical_boom_compares_own_history_only():
+    metrics = _metrics(
+        forecast_growth=0.35,
+    )
+    metrics["valuation"]["pe_ttm"] = 30.0
+    metrics["historical"]["pe_ttm"] = {
+        "p25": 50.0,
+        "p50": 100.0,
+        "p75": 150.0,
+        "percentile": 10.0,
+    }
+    # Peer median is LOW (40): the old min(peer, history) check would give a
+    # threshold of 0.5*40=20 and NOT trigger for current PE 30. The fix compares
+    # against own history only (0.5*100=50), so the PE anchor is dropped.
+    metrics["industry_peers"]["pe"] = {"median": 40.0, "mean": 45.0}
+    result = relative_valuation(metrics)
+    detail = {item["metric"]: item for item in result["detail"]}
+    assert "pe_ttm_hist_leader" not in detail
     assert any("周期景气高点" in note for note in result["notes"])
 
 

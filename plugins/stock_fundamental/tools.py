@@ -65,6 +65,12 @@ def _manual_peers_for_symbol(symbol: str) -> list[Any]:
     return list(MANUAL_PEERS.get(symbol) or [])
 
 
+def _skip_llm_peer_validation(symbol: str) -> bool:
+    """True when the symbol's valuation config disables LLM peer validation."""
+    cfg, _, _ = load_valuation_config(symbol)
+    return bool(cfg.get("skip_llm_peer_validation", False))
+
+
 def _num(value: Any) -> float | None:
     try:
         number = float(value)
@@ -855,6 +861,7 @@ async def _get_industry_valuation_comparison(
         "matched_industry": "",
     }
     manual_peers = _manual_peers_for_symbol(symbol)
+    skip_llm = _skip_llm_peer_validation(symbol)
     if manual_peers:
         try:
             stats, peer_list, peer_count = await _fetch_peer_stats(
@@ -874,29 +881,31 @@ async def _get_industry_valuation_comparison(
                 )
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"get_industry_valuation_comparison manual peers 失败: {exc}")
-    try:
-        frame = await run_blocking(
-            lambda: _call_ak(
-                lambda ak: ak.stock_zh_valuation_comparison_em(symbol=_em_symbol(symbol))
-            ),
-            timeout=30.0,
-            retries=0,
-        )
-        if frame is not None and not frame.empty and "简称" in frame.columns:
-            comparison = _comparison_stats(frame, symbol)
-            peer_count = len(comparison.get("peer_list") or [])
-            if comparison and peer_count >= PEER_MIN_COUNT:
-                result["peers"] = comparison
-                result["peer_count"] = peer_count
-                result["basis"] = "peers"
-                result["source"] = "eastmoney"
-                result["matched_industry"] = str(
-                    frame.get("行业", pd.Series([""])).iloc[0] or ""
-                )
-    except Exception as exc:  # noqa: BLE001
-        warnings.append(f"get_industry_valuation_comparison eastmoney 失败: {exc}")
+    manual_locked = skip_llm and result.get("source") == "manual"
+    if not manual_locked:
+        try:
+            frame = await run_blocking(
+                lambda: _call_ak(
+                    lambda ak: ak.stock_zh_valuation_comparison_em(symbol=_em_symbol(symbol))
+                ),
+                timeout=30.0,
+                retries=0,
+            )
+            if frame is not None and not frame.empty and "简称" in frame.columns:
+                comparison = _comparison_stats(frame, symbol)
+                peer_count = len(comparison.get("peer_list") or [])
+                if comparison and peer_count >= PEER_MIN_COUNT:
+                    result["peers"] = comparison
+                    result["peer_count"] = peer_count
+                    result["basis"] = "peers"
+                    result["source"] = "eastmoney"
+                    result["matched_industry"] = str(
+                        frame.get("行业", pd.Series([""])).iloc[0] or ""
+                    )
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"get_industry_valuation_comparison eastmoney 失败: {exc}")
 
-    if result.get("basis") == "peers":
+    if result.get("basis") == "peers" and not skip_llm:
         try:
             llm_result = await _validate_peers_with_llm(
                 symbol,
