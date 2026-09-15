@@ -49,6 +49,10 @@ export const api = {
   me: () => request<UserInfo>("/api/me"),
   listWatchlist: (market: string = "a") =>
     request<WatchlistItem[]>(`/api/watchlist?market=${encodeURIComponent(market)}`),
+  getReport: (symbol: string, market: string = "a") =>
+    request<{ report: string; summary: unknown; fundamental: unknown }>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/report?market=${encodeURIComponent(market)}`
+    ),
   addWatchlist: (query: string, market: string = "a") =>
     request<AddResult>("/api/watchlist", {
       method: "POST",

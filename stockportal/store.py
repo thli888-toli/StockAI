@@ -318,6 +318,40 @@ class WatchlistStore:
                 ).fetchall()
         return [self._item_from_row(row) for row in rows]
 
+    def all_items_summary(
+        self,
+        user_id: str,
+        market: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List rows without transferring the heavy outputs JSON."""
+        columns = (
+            "user_id, market, symbol, company_name, industry, tags, run_id, "
+            "status, error, '{}' AS outputs, "
+            "CASE WHEN outputs LIKE '%\"report\"%' THEN 1 ELSE 0 END AS has_report, "
+            "CASE WHEN outputs LIKE '%daily_features%' THEN 1 ELSE 0 END AS has_chart, "
+            "created_at, updated_at"
+        )
+        with self.lock:
+            if market:
+                rows = self.conn.execute(
+                    f"SELECT {columns} FROM watchlist WHERE user_id=? AND market=? "
+                    "ORDER BY created_at DESC",
+                    (user_id, market),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    f"SELECT {columns} FROM watchlist WHERE user_id=? "
+                    "ORDER BY market, created_at DESC",
+                    (user_id,),
+                ).fetchall()
+        results = []
+        for row in rows:
+            item = self._item_from_row(row)
+            item["has_report"] = bool(item.get("has_report"))
+            item["has_chart"] = bool(item.get("has_chart"))
+            results.append(item)
+        return results
+
     def all_by_symbol(self, symbol: str) -> list[dict[str, Any]]:
         """Return every watchlist row for a symbol across all users."""
         with self.lock:

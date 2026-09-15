@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import sqlite3
+import time
 from pathlib import Path
 
 import httpx
@@ -55,6 +56,17 @@ def _auth_headers(client, nickname: str = "test_user") -> dict:
     response = client.post("/api/login", json={"nickname": nickname})
     assert response.status_code == 200
     return {"Authorization": f"Bearer {response.json()['token']}"}
+
+
+def _wait_for_items(client, headers, predicate, timeout: float = 4.0):
+    deadline = time.time() + timeout
+    items: list = []
+    while time.time() < deadline:
+        items = client.get("/api/watchlist", headers=headers).json()
+        if predicate(items):
+            return items
+        time.sleep(0.1)
+    return items
 
 
 def test_fibonacci_levels_bracket_price_below_range():
@@ -367,14 +379,51 @@ def test_watchlist_list_syncs_status_and_metadata(monkeypatch, tmp_path):
     with TestClient(app) as client:
         headers = _auth_headers(client)
         client.post("/api/watchlist", json={"query": "600519"}, headers=headers)
-        response = client.get("/api/watchlist", headers=headers)
+        items = _wait_for_items(
+            client,
+            headers,
+            lambda rows: rows and rows[0]["status"] == "completed",
+        )
 
-    assert response.status_code == 200
-    item = response.json()[0]
+    item = items[0]
     assert item["status"] == "completed"
     assert item["company_name"] == "贵州茅台"
     assert item["industry"] == "白酒"
-    assert item["outputs"]["report"] == "# report"
+    assert item["outputs"] == {}
+    assert item["has_report"] is True
+
+
+def test_watchlist_report_endpoint_returns_payload_on_demand(monkeypatch, tmp_path):
+    def fake_post(url, json=None, timeout=None):
+        return FakeResponse(200, _run_payload("r1", "running", json["query"]))
+
+    def fake_get(url, timeout=None):
+        outputs = {
+            "market_data": '{"symbol":"600519","company_name":"贵州茅台","industry":"白酒"}',
+            "report": '{"report":"# 报告","summary":{"overall":"neutral","text":"中性"}}',
+        }
+        return FakeResponse(
+            200,
+            [_run_payload("r1", "completed", "600519", outputs=outputs)],
+        )
+
+    monkeypatch.setattr(stock_portal_app.httpx, "post", fake_post)
+    monkeypatch.setattr(stock_portal_app.httpx, "get", fake_get)
+    app = _make_app(tmp_path)
+    with TestClient(app) as client:
+        headers = _auth_headers(client)
+        client.post("/api/watchlist", json={"query": "600519"}, headers=headers)
+        _wait_for_items(
+            client,
+            headers,
+            lambda rows: rows and rows[0]["has_report"] is True,
+        )
+        response = client.get("/api/watchlist/600519/report", headers=headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "# 报告" in payload["report"]
+    assert payload["summary"]["overall"] == "neutral"
 
 
 def test_watchlist_list_marks_missing_running_run_failed(monkeypatch, tmp_path):
@@ -390,10 +439,13 @@ def test_watchlist_list_marks_missing_running_run_failed(monkeypatch, tmp_path):
     with TestClient(app) as client:
         headers = _auth_headers(client)
         client.post("/api/watchlist", json={"query": "600519"}, headers=headers)
-        response = client.get("/api/watchlist", headers=headers)
+        items = _wait_for_items(
+            client,
+            headers,
+            lambda rows: rows and rows[0]["status"] == "failed",
+        )
 
-    assert response.status_code == 200
-    item = response.json()[0]
+    item = items[0]
     assert item["status"] == "failed"
     assert "run no longer available" in item["error"]
 

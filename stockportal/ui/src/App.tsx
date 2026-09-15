@@ -24,6 +24,9 @@ export default function App() {
   const [tagQuery, setTagQuery] = useState("");
   const [tagSort, setTagSort] = useState<"none" | "asc" | "desc">("none");
   const pollRef = useRef<number | null>(null);
+  const listLoadingRef = useRef(false);
+  const [reportContent, setReportContent] = useState("");
+  const [reportError, setReportError] = useState("");
   const [chartSnapshots, setChartSnapshots] = useState<
     { id: number; period: string; label: string; saved_at: string }[]
   >([]);
@@ -49,6 +52,26 @@ export default function App() {
       .catch((err) => {
         if (!cancelled) {
           setHistoryError(err instanceof Error ? err.message : String(err));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [modal, market]);
+
+  useEffect(() => {
+    if (!modal || modal.kind !== "report") return;
+    let cancelled = false;
+    setReportContent("");
+    setReportError("");
+    api
+      .getReport(modal.item.symbol, market)
+      .then((payload) => {
+        if (!cancelled) setReportContent(payload.report);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setReportError(err instanceof Error ? err.message : String(err));
         }
       });
     return () => {
@@ -115,11 +138,13 @@ export default function App() {
   const startPolling = () => {
     if (pollRef.current !== null) return;
     pollRef.current = window.setInterval(() => {
-      refreshList();
-    }, 2000);
+      void refreshList();
+    }, 5000);
   };
 
   const loadMarketList = useCallback(async (target: "a" | "us") => {
+    if (listLoadingRef.current) return;
+    listLoadingRef.current = true;
     try {
       const list = await api.listWatchlist(target);
       setItems(list);
@@ -127,6 +152,8 @@ export default function App() {
       const message = refreshError instanceof Error ? refreshError.message : String(refreshError);
       setError(message);
       if (message.includes("未登录")) setUser(null);
+    } finally {
+      listLoadingRef.current = false;
     }
   }, []);
 
@@ -300,9 +327,7 @@ export default function App() {
     return list;
   }, [items, tagQuery, tagSort]);
 
-  const rawReport = modal?.kind === "report"
-    ? (modal.item.outputs?.report as string | undefined)
-    : undefined;
+  const rawReport = modal?.kind === "report" ? reportContent : undefined;
   const report = (() => {
     if (!rawReport) return undefined;
     try {
@@ -503,10 +528,12 @@ export default function App() {
             </div>
             <div className="modal-body">
               {modal.kind === "report" ? (
-                typeof report === "string" ? (
+                reportError ? (
+                  <p className="error">{reportError}</p>
+                ) : typeof report === "string" ? (
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{report}</ReactMarkdown>
                 ) : (
-                  <p>暂无报告。</p>
+                  <p>报告加载中...</p>
                 )
               ) : modal.kind === "chart" ? (
                 <>
