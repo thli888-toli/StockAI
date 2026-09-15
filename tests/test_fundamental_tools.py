@@ -22,6 +22,31 @@ def _cache(monkeypatch, tmp_path) -> FundamentalCacheStore:
 
 
 @pytest.mark.asyncio
+async def test_peer_comparison_can_be_disabled_by_config(monkeypatch, tmp_path):
+    _cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        tools,
+        "load_valuation_config",
+        lambda symbol: (
+            {"peer_comparison_enabled": False},
+            "test.json",
+            ["peer_comparison_enabled"],
+        ),
+    )
+    warnings: list[str] = []
+    result = await tools.run_tool(
+        "get_industry_valuation_comparison",
+        "600519",
+        {},
+        warnings,
+    )
+    assert result["source"] == "disabled"
+    assert result["peers"] == {}
+    assert result["industry"] == {}
+    assert any("关闭" in warning for warning in warnings)
+
+
+@pytest.mark.asyncio
 async def test_get_model_targets_tool_dispatches_with_metrics(monkeypatch):
     captured = {}
 

@@ -853,6 +853,17 @@ async def _get_industry_valuation_comparison(
     market_data: dict[str, Any],
     warnings: list[str],
 ) -> dict[str, Any]:
+    cfg, _, _ = load_valuation_config(symbol)
+    if cfg.get("peer_comparison_enabled", True) is False:
+        warnings.append("同行对比已按配置关闭，相对估值仅使用自身历史分位。")
+        return {
+            "symbol": symbol,
+            "source": "disabled",
+            "basis": "",
+            "peer_count": 0,
+            "peers": {},
+            "industry": {},
+        }
     result: dict[str, Any] = {
         "symbol": symbol,
         "source": "",
