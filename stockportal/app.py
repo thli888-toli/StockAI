@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -247,6 +248,28 @@ def _fundamental_from_outputs(outputs: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _public_item(item: dict[str, Any]) -> dict[str, Any]:
+    """List/CRUD responses must stay small: drop heavy analysis outputs."""
+    outputs = item.get("outputs") or {}
+    market_data = _market_data_from_outputs(outputs)
+    has_report = (
+        bool(item.get("has_report"))
+        if "has_report" in item
+        else bool(outputs.get("report"))
+    )
+    has_chart = (
+        bool(item.get("has_chart"))
+        if "has_chart" in item
+        else bool(market_data.get("daily_features"))
+    )
+    return {
+        **item,
+        "outputs": {},
+        "has_report": has_report,
+        "has_chart": has_chart,
+    }
+
+
 def _build_chart_payload(
     symbol: str,
     market_data: dict[str, Any],
@@ -436,7 +459,7 @@ def _sync_market_watchlist(
 ) -> None:
     base = orchestrator_url.rstrip("/")
     try:
-        response = httpx.get(f"{base}/runs", timeout=5.0)
+        response = httpx.get(f"{base}/runs", timeout=2.0)
         response.raise_for_status()
         runs = response.json()
     except (httpx.HTTPError, ValueError):
@@ -479,6 +502,33 @@ def _sync_market_watchlist(
                 company_name=item.get("company_name") or "",
                 industry=item.get("industry") or "",
             )
+
+
+_SYNC_LOCK = threading.Lock()
+_SYNC_INFLIGHT: set[tuple[str, str]] = set()
+
+
+def _sync_watchlist_in_background(
+    store: WatchlistStore,
+    user_id: str,
+    orchestrator_url: str,
+    market: str,
+) -> None:
+    """Refresh run status without blocking the watchlist request."""
+    key = (user_id, market)
+    with _SYNC_LOCK:
+        if key in _SYNC_INFLIGHT:
+            return
+        _SYNC_INFLIGHT.add(key)
+
+    def worker() -> None:
+        try:
+            _sync_market_watchlist(store, user_id, orchestrator_url, market)
+        finally:
+            with _SYNC_LOCK:
+                _SYNC_INFLIGHT.discard(key)
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def create_stock_portal_app(
@@ -586,13 +636,16 @@ def create_stock_portal_app(
         user: dict[str, Any] = Depends(get_current_user),
     ):
         market = _validate_market(market)
-        _sync_market_watchlist(
+        _sync_watchlist_in_background(
             store,
             user["user_id"],
             _url_for_market(market),
             market,
         )
-        return store.all_items(user["user_id"], market)
+        return [
+            _public_item(item)
+            for item in store.all_items_summary(user["user_id"], market)
+        ]
 
     @app.post("/api/watchlist")
     def add_to_watchlist(
@@ -607,14 +660,16 @@ def create_stock_portal_app(
                 "message": "股票已经在股票池中",
             }
         run = _create_run(_url_for_market(market), symbol)
-        return store.upsert(
-            user["user_id"],
-            symbol,
-            market=market,
-            run_id=run["run_id"],
-            status=run["status"],
-            error=run["error"],
-            outputs=run["outputs"],
+        return _public_item(
+            store.upsert(
+                user["user_id"],
+                symbol,
+                market=market,
+                run_id=run["run_id"],
+                status=run["status"],
+                error=run["error"],
+                outputs=run["outputs"],
+            )
         )
 
     @app.post("/api/watchlist/{symbol}/refresh")
@@ -637,16 +692,18 @@ def create_stock_portal_app(
                 "message": "今日股票分析已经生成，无需重复刷新",
             }
         run = _create_run(_url_for_market(market), symbol)
-        return store.upsert(
-            user["user_id"],
-            symbol,
-            market=market,
-            run_id=run["run_id"],
-            status=run["status"],
-            error=run["error"],
-            outputs=run["outputs"],
-            company_name=existing.get("company_name") or "",
-            industry=existing.get("industry") or "",
+        return _public_item(
+            store.upsert(
+                user["user_id"],
+                symbol,
+                market=market,
+                run_id=run["run_id"],
+                status=run["status"],
+                error=run["error"],
+                outputs=run["outputs"],
+                company_name=existing.get("company_name") or "",
+                industry=existing.get("industry") or "",
+            )
         )
 
     @app.delete("/api/watchlist/{symbol}")
@@ -674,7 +731,7 @@ def create_stock_portal_app(
         item = store.update_tags(user["user_id"], symbol, payload.tags, market)
         if item is None:
             raise HTTPException(status_code=404, detail="watchlist symbol not found")
-        return item
+        return _public_item(item)
 
     @app.get("/api/watchlist/{symbol}/chart")
     def chart(
@@ -694,6 +751,27 @@ def create_stock_portal_app(
         if payload is None:
             raise HTTPException(status_code=404, detail="market data not available yet")
         return payload
+
+    @app.get("/api/watchlist/{symbol}/report")
+    def report(
+        symbol: str,
+        user: dict[str, Any] = Depends(get_current_user),
+        market: str = Query(default="a"),
+    ):
+        market = _validate_market(market)
+        symbol = _validate_symbol(symbol, market)
+        item = store.get(user["user_id"], symbol, market)
+        if item is None:
+            raise HTTPException(status_code=404, detail="watchlist symbol not found")
+        outputs = item.get("outputs") or {}
+        report_text = outputs.get("report")
+        if not isinstance(report_text, str) or not report_text:
+            raise HTTPException(status_code=404, detail="report not available yet")
+        return {
+            "report": report_text,
+            "summary": _summary_from_report(report_text),
+            "fundamental": _fundamental_from_outputs(outputs),
+        }
 
     @app.post("/api/watchlist/{symbol}/chart/save")
     def save_chart(

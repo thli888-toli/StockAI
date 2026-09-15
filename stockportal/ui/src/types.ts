@@ -21,6 +21,8 @@ export type WatchlistItem = {
   status: RunStatus;
   error: string | null;
   outputs: Record<string, unknown>;
+  has_report?: boolean;
+  has_chart?: boolean;
   created_at: string;
   updated_at: string;
 };
