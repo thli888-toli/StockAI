@@ -273,6 +273,27 @@ def test_orchestrator_graph_can_be_fetched_by_manifest_name(tmp_path):
         assert client.get("/graph/does_not_exist.yaml").status_code == 404
 
 
+def test_agent_registration_retries_until_registry_is_ready():
+    import types
+
+    from framework.agent_service import AgentService
+
+    class Dummy:
+        def __init__(self) -> None:
+            self.manifest = types.SimpleNamespace(name="dummy")
+            self.registry = types.SimpleNamespace(base_url="http://registry")
+            self.calls = 0
+
+        async def register(self) -> None:
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("502 Bad Gateway")
+
+    dummy = Dummy()
+    asyncio.run(AgentService.register_with_retry(dummy, attempts=5, delay=0.01))
+    assert dummy.calls == 3
+
+
 def test_monthly_signal_combines_macd_and_ma():
     from plugins.stock_quant import service as quant_service
 

@@ -22,6 +22,36 @@ def _python() -> str:
     return sys.executable
 
 
+def _wait_for_registry(
+    port: int,
+    process: subprocess.Popen | None = None,
+    timeout: float = 30.0,
+) -> None:
+    """Block until the local registry answers /health (or raise)."""
+    import httpx
+
+    deadline = time.time() + timeout
+    url = f"http://127.0.0.1:{port}/health"
+    last_error = ""
+    while time.time() < deadline:
+        if process is not None and process.poll() is not None:
+            raise RuntimeError(
+                f"registry exited during startup with code {process.returncode}"
+            )
+        try:
+            response = httpx.get(url, timeout=1.5)
+            if response.status_code == 200:
+                return
+            last_error = f"HTTP {response.status_code}"
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+        time.sleep(0.3)
+    raise RuntimeError(
+        f"registry did not become healthy at {url} within {timeout:g}s "
+        f"(last error: {last_error})"
+    )
+
+
 def run_registry(host: str = "127.0.0.1", port: int = 8001) -> None:
     uvicorn.run("framework.registry:registry_app", host=host, port=port)
 
@@ -97,18 +127,14 @@ def start_all(
     ]
     processes: list[tuple[str, subprocess.Popen]] = []
     try:
-        processes.append(
-            (
-                "registry",
-                subprocess.Popen(
-                    [_python(), "-m", "main", "registry"],
-                    cwd=root,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.STDOUT,
-                ),
-            )
+        registry_process = subprocess.Popen(
+            [_python(), "-m", "main", "registry"],
+            cwd=root,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
         )
-        time.sleep(0.3)
+        processes.append(("registry", registry_process))
+        _wait_for_registry(registry_port, registry_process)
         for plugin in plugin_paths:
             processes.append(
                 (
