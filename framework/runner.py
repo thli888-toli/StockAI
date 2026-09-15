@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -20,6 +21,46 @@ from framework.config import (
 
 def _python() -> str:
     return sys.executable
+
+
+def _service_log_path(root: Path, label: str) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("_") or "service"
+    return root / "logs" / f"{safe}.log"
+
+
+def _spawn_service(
+    label: str,
+    argv: list[str],
+    root: Path,
+    handles: list,
+    commands: dict[str, list[str]] | None = None,
+) -> tuple[str, subprocess.Popen]:
+    """Start a child service with its output captured under logs/."""
+    if commands is not None:
+        commands[label] = list(argv)
+    path = _service_log_path(root, label)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a", encoding="utf-8", errors="replace")
+    handle.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {label} ===\n")
+    handle.flush()
+    handles.append(handle)
+    process = subprocess.Popen(
+        argv,
+        cwd=root,
+        stdout=handle,
+        stderr=subprocess.STDOUT,
+    )
+    return label, process
+
+
+def _tail_text(path: Path, lines: int = 15) -> str:
+    if not path.exists():
+        return ""
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:  # noqa: BLE001
+        return ""
+    return "\n".join(content[-lines:])
 
 
 def _wait_for_registry(
@@ -126,107 +167,122 @@ def start_all(
         "plugins/us_validator/agent.yaml",
     ]
     processes: list[tuple[str, subprocess.Popen]] = []
+    log_handles: list = []
+    commands: dict[str, list[str]] = {}
     try:
-        registry_process = subprocess.Popen(
+        registry_entry = _spawn_service(
+            "registry",
             [_python(), "-m", "main", "registry"],
-            cwd=root,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.STDOUT,
+            root,
+            log_handles,
+            commands,
         )
-        processes.append(("registry", registry_process))
+        processes.append(registry_entry)
+        registry_process = registry_entry[1]
         _wait_for_registry(registry_port, registry_process)
         for plugin in plugin_paths:
             processes.append(
-                (
+                _spawn_service(
                     f"agent:{plugin}",
-                    subprocess.Popen(
-                        [_python(), "-m", "main", "agent", "--manifest", plugin],
-                        cwd=root,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.STDOUT,
-                    ),
+                    [_python(), "-m", "main", "agent", "--manifest", plugin],
+                    root,
+                    log_handles,
+                    commands,
                 )
             )
+            time.sleep(0.8)
         processes.append(
-            (
+            _spawn_service(
                 f"orchestrator:{manifest_path}",
-                subprocess.Popen(
-                    [
-                        _python(),
-                        "-m",
-                        "main",
-                        "orchestrator",
-                        "--manifest",
-                        manifest_path,
-                        "--port",
-                        str(orchestrator_port),
-                        "--checkpoint-db",
-                        str(CHECKPOINT_DB),
-                        "--queue-db",
-                        str(RUN_QUEUE_DB),
-                    ],
-                    cwd=root,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.STDOUT,
-                ),
+                [
+                    _python(),
+                    "-m",
+                    "main",
+                    "orchestrator",
+                    "--manifest",
+                    manifest_path,
+                    "--port",
+                    str(orchestrator_port),
+                    "--checkpoint-db",
+                    str(CHECKPOINT_DB),
+                    "--queue-db",
+                    str(RUN_QUEUE_DB),
+                ],
+                root,
+                log_handles,
+                commands,
             )
         )
         processes.append(
-            (
+            _spawn_service(
                 f"orchestrator_us:{us_manifest_path}",
-                subprocess.Popen(
-                    [
-                        _python(),
-                        "-m",
-                        "main",
-                        "orchestrator",
-                        "--manifest",
-                        us_manifest_path,
-                        "--port",
-                        str(us_orchestrator_port),
-                        "--checkpoint-db",
-                        "state/orchestrator_us.db",
-                        "--queue-db",
-                        "state/orchestrator_queue_us.db",
-                    ],
-                    cwd=root,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.STDOUT,
-                ),
+                [
+                    _python(),
+                    "-m",
+                    "main",
+                    "orchestrator",
+                    "--manifest",
+                    us_manifest_path,
+                    "--port",
+                    str(us_orchestrator_port),
+                    "--checkpoint-db",
+                    "state/orchestrator_us.db",
+                    "--queue-db",
+                    "state/orchestrator_queue_us.db",
+                ],
+                root,
+                log_handles,
+                commands,
             )
         )
         processes.append(
-            (
+            _spawn_service(
                 "portal",
-                subprocess.Popen(
-                    [_python(), "-m", "main", "portal"],
-                    cwd=root,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.STDOUT,
-                ),
+                [_python(), "-m", "main", "portal"],
+                root,
+                log_handles,
+                commands,
             )
         )
         processes.append(
-            (
+            _spawn_service(
                 "stockportal",
-                subprocess.Popen(
-                    [_python(), "-m", "main", "stockportal"],
-                    cwd=root,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.STDOUT,
-                ),
+                [_python(), "-m", "main", "stockportal"],
+                root,
+                log_handles,
+                commands,
             )
         )
         print(
             "Started registry, CN+US agents, CN orchestrator (8020), US orchestrator (8029), "
             "monitoring portal, and stock portal. Press Ctrl+C to stop."
         )
+        restarts: dict[str, int] = {}
+        max_restarts = 2
         while True:
-            for label, proc in processes:
+            for index, (label, proc) in enumerate(list(processes)):
                 if proc.poll() is not None:
+                    log_path = _service_log_path(root, label)
+                    count = restarts.get(label, 0)
+                    if count < max_restarts and label in commands:
+                        restarts[label] = count + 1
+                        print(
+                            f"service '{label}' exited with code {proc.returncode}; "
+                            f"restarting ({count + 1}/{max_restarts})",
+                            flush=True,
+                        )
+                        processes[index] = _spawn_service(
+                            label,
+                            commands[label],
+                            root,
+                            log_handles,
+                            commands,
+                        )
+                        continue
                     raise RuntimeError(
                         f"service '{label}' exited unexpectedly "
-                        f"with code {proc.returncode}"
+                        f"with code {proc.returncode}; log: {log_path}\n"
+                        f"--- last log lines ---\n{_tail_text(log_path)}"
                     )
             time.sleep(1)
     except KeyboardInterrupt:
@@ -240,3 +296,8 @@ def start_all(
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        for handle in log_handles:
+            try:
+                handle.close()
+            except Exception:  # noqa: BLE001
+                pass
