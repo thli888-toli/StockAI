@@ -67,7 +67,7 @@ class AgentService:
 
         @asynccontextmanager
         async def lifespan(app: FastAPI):
-            await self.register()
+            await self.register_with_retry()
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             yield
             if self._heartbeat_task:
@@ -82,6 +82,27 @@ class AgentService:
 
     async def register(self) -> None:
         await self.registry.register(self.card)
+
+    async def register_with_retry(
+        self,
+        attempts: int = 30,
+        delay: float = 1.0,
+    ) -> None:
+        """Register with backoff so agents can start while the registry boots."""
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                await self.register()
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if attempt < attempts - 1:
+                    await asyncio.sleep(delay)
+        message = str(last_error) or type(last_error).__name__
+        raise RuntimeError(
+            f"could not register agent '{self.manifest.name}' with "
+            f"{self.registry.base_url} after {attempts} attempts: {message}"
+        ) from last_error
 
     async def _heartbeat_loop(self) -> None:
         while True:
