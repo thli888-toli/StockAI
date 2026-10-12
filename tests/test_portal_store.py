@@ -76,3 +76,32 @@ def test_portal_store_runs_carry_market(tmp_path):
     assert store.get_run("r-us")["status"] == "running"
     store.mark_orphaned_running_runs_failed(known_run_ids=set(), market="us")
     assert store.get_run("r-us")["status"] == "failed"
+
+
+def test_portal_store_prunes_old_metrics(tmp_path):
+    store = PortalStore(tmp_path / "portal.db")
+    with store.lock, store.conn:
+        store.conn.execute(
+            "INSERT INTO metrics_snapshots(service, ts, data) VALUES(?, ?, ?)",
+            ("old-service", "2020-01-01T00:00:00+00:00", "{}"),
+        )
+    deleted = store.prune_history(metrics_days=1)
+    assert deleted["metrics"] >= 1
+    with store.lock:
+        rows = store.conn.execute(
+            "SELECT COUNT(*) FROM metrics_snapshots WHERE service='old-service'"
+        ).fetchone()[0]
+    assert rows == 0
+
+
+def test_portal_store_list_runs_omits_outputs(tmp_path):
+    store = PortalStore(tmp_path / "portal.db")
+    store.upsert_run(
+        {
+            **_run("r-heavy", "completed", "2026-08-26T00:00:00+00:00"),
+            "outputs": {"report": "x" * 1000},
+        }
+    )
+    listed = store.list_runs(limit=10)
+    assert listed[0]["outputs"] == {}
+    assert store.get_run("r-heavy")["outputs"]["report"].startswith("x")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,10 @@ class PortalStore:
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.Lock()
         self._create_tables()
+        try:
+            self.prune_history()
+        except Exception:
+            pass
 
     def _create_tables(self) -> None:
         with self.lock, self.conn:
@@ -121,6 +125,83 @@ class PortalStore:
             columns = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})")}
             if column not in columns:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
+    def prune_history(
+        self,
+        metrics_days: int = 3,
+        logs_days: int = 7,
+        runs_days: int = 14,
+        keep_per_service: int = 5000,
+        keep_logs: int = 20000,
+        keep_runs: int = 500,
+    ) -> dict[str, int]:
+        """Bound the monitoring DB size so inserts/queries stay fast."""
+        metrics_cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=metrics_days)
+        ).isoformat()
+        logs_cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=logs_days)
+        ).isoformat()
+        runs_cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=runs_days)
+        ).isoformat()
+        with self.lock, self.conn:
+            deleted_metrics = self.conn.execute(
+                "DELETE FROM metrics_snapshots WHERE ts < ?",
+                (metrics_cutoff,),
+            ).rowcount
+            services = [
+                row["service"]
+                for row in self.conn.execute(
+                    "SELECT DISTINCT service FROM metrics_snapshots"
+                )
+            ]
+            for service in services:
+                deleted_metrics += self.conn.execute(
+                    """
+                    DELETE FROM metrics_snapshots
+                    WHERE service=? AND id NOT IN (
+                        SELECT id FROM metrics_snapshots
+                        WHERE service=?
+                        ORDER BY ts DESC, id DESC
+                        LIMIT ?
+                    )
+                    """,
+                    (service, service, keep_per_service),
+                ).rowcount
+            deleted_logs = self.conn.execute(
+                "DELETE FROM logs WHERE ts < ?",
+                (logs_cutoff,),
+            ).rowcount
+            deleted_logs += self.conn.execute(
+                """
+                DELETE FROM logs
+                WHERE id NOT IN (
+                    SELECT id FROM logs ORDER BY ts DESC, id DESC LIMIT ?
+                )
+                """,
+                (keep_logs,),
+            ).rowcount
+            deleted_runs = self.conn.execute(
+                "DELETE FROM runs WHERE created_at < ?",
+                (runs_cutoff,),
+            ).rowcount
+            deleted_runs += self.conn.execute(
+                """
+                DELETE FROM runs
+                WHERE run_id NOT IN (
+                    SELECT run_id FROM runs
+                    ORDER BY created_at DESC, run_id DESC
+                    LIMIT ?
+                )
+                """,
+                (keep_runs,),
+            ).rowcount
+        return {
+            "metrics": deleted_metrics,
+            "logs": deleted_logs,
+            "runs": deleted_runs,
+        }
 
     def upsert_agent(self, view: dict[str, Any]) -> None:
         with self.lock, self.conn:
@@ -297,12 +378,19 @@ class PortalStore:
         params.append(limit)
         with self.lock:
             rows = self.conn.execute(
-                f"SELECT * FROM runs{where} ORDER BY created_at DESC LIMIT ?", params
+                f"""
+                SELECT run_id, market, graph_config, status, query, error,
+                       created_at, updated_at, events
+                FROM runs{where}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                params,
             ).fetchall()
         runs = []
         for row in rows:
             item = dict(row)
-            item["outputs"] = json.loads(item.pop("outputs") or "{}")
+            item["outputs"] = {}
             item["events"] = json.loads(item.pop("events") or "[]")
             runs.append(item)
         return runs

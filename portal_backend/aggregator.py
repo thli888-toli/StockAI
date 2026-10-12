@@ -17,13 +17,14 @@ class PortalAggregator:
         registry_url: str = REGISTRY_URL,
         orchestrator_url: str = ORCHESTRATOR_URL,
         us_orchestrator_url: str = US_ORCHESTRATOR_URL,
-        interval_seconds: float = 5.0,
+        interval_seconds: float = 10.0,
     ) -> None:
         self.store = store
         self.registry_url = registry_url.rstrip("/")
         self.orchestrator_url = orchestrator_url.rstrip("/")
         self.us_orchestrator_url = us_orchestrator_url.rstrip("/")
         self.interval_seconds = interval_seconds
+        self._cycle = 0
 
     async def run_forever(self) -> None:
         while True:
@@ -31,6 +32,9 @@ class PortalAggregator:
             await asyncio.sleep(self.interval_seconds)
 
     async def collect_once(self) -> None:
+        self._cycle += 1
+        if self._cycle % 60 == 0:
+            await asyncio.to_thread(self.store.prune_history)
         async with httpx.AsyncClient(timeout=3.0) as client:
             await self._collect_registry(client)
             await self._collect_orchestrator(client, "a", self.orchestrator_url)
@@ -44,8 +48,8 @@ class PortalAggregator:
         except Exception:
             return
         for view in agents:
-            self.store.upsert_agent(view)
-            if view.get("status") == "healthy":
+            await asyncio.to_thread(self.store.upsert_agent, view)
+            if view.get("status") == "healthy" and self._cycle % 3 == 1:
                 await self._collect_agent_metrics(client, view)
 
     async def _collect_agent_metrics(self, client: httpx.AsyncClient, view: dict[str, Any]) -> None:
@@ -55,7 +59,11 @@ class PortalAggregator:
         try:
             response = await client.get(f"{endpoint}/metrics")
             response.raise_for_status()
-            self.store.insert_metric(view["name"], response.json())
+            await asyncio.to_thread(
+                self.store.insert_metric,
+                view["name"],
+                response.json(),
+            )
         except Exception:
             return
 
@@ -68,19 +76,24 @@ class PortalAggregator:
         try:
             response = await client.get(f"{orchestrator_url}/graph")
             response.raise_for_status()
-            self.store.set_graph(market, response.json())
+            await asyncio.to_thread(self.store.set_graph, market, response.json())
         except Exception:
             pass
         try:
             response = await client.get(f"{orchestrator_url}/graph-configs")
             response.raise_for_status()
-            self.store.set_graph_configs(market, response.json())
+            await asyncio.to_thread(
+                self.store.set_graph_configs,
+                market,
+                response.json(),
+            )
         except Exception:
             pass
         try:
             response = await client.get(f"{orchestrator_url}/metrics")
             response.raise_for_status()
-            self.store.insert_metric(
+            await asyncio.to_thread(
+                self.store.insert_metric,
                 "orchestrator_us" if market == "us" else "orchestrator",
                 response.json(),
             )
@@ -93,8 +106,12 @@ class PortalAggregator:
             for run in runs:
                 item = dict(run)
                 item["market"] = market
-                self.store.upsert_run(item)
+                await asyncio.to_thread(self.store.upsert_run, item)
             known_ids = {run["run_id"] for run in runs}
-            self.store.mark_orphaned_running_runs_failed(known_ids, market)
+            await asyncio.to_thread(
+                self.store.mark_orphaned_running_runs_failed,
+                known_ids,
+                market,
+            )
         except Exception:
             pass

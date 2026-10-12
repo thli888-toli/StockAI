@@ -46,7 +46,7 @@ class JsonFormatter(logging.Formatter):
 class _PortalLogForwarder(logging.Handler):
     """Buffers JSON records and posts them to the portal backend."""
 
-    def __init__(self, portal_url: str, batch_size: int = 20, flush_seconds: float = 2.0) -> None:
+    def __init__(self, portal_url: str, batch_size: int = 50, flush_seconds: float = 5.0) -> None:
         super().__init__()
         self.portal_url = portal_url.rstrip("/") + "/logs/ingest"
         self.batch_size = batch_size
