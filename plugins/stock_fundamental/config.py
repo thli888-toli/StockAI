@@ -59,6 +59,7 @@ _BOOL_KEYS = {
     "skip_llm_peer_validation",
     "leader_pb_enabled",
     "leader_use_ttm_pe_history",
+    "peer_comparison_enabled",
 }
 _STR_KEYS = {
     "config_version",

@@ -66,12 +66,12 @@ def create_portal_app(
     app = FastAPI(title="Agent Management Portal", version="1.0.0", lifespan=lifespan)
 
     @app.get("/health")
-    def health():
+    async def health():
         return {"status": "ok"}
 
     @app.get("/api/agents")
-    def agents():
-        return store.get_agents()
+    async def agents():
+        return await asyncio.to_thread(store.get_agents)
 
     @app.get("/api/graph")
     def graph(
